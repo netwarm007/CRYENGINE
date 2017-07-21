@@ -7,11 +7,13 @@
 #include <CryEntitySystem/IEntitySystem.h>          // IEntityIt
 #include <CrySystem/IConsole.h>                     // IConsole
 #include <Cry3DEngine/I3DEngine.h>                  // I3DEngine
+#include <CryGame/IGame.h>                          // IGame
 #include <CryGame/IGameFramework.h>                 // IGameFramework
 #include "TestSystemLegacy.h"
 #include "DebugCallStack.h"                 // DebugCallStack
 
-#include <../CryAction/ILevelSystem.h>                   // ILevelSystemListener
+#include "IGameRulesSystem.h"               // IGameRulesSystem
+#include <ILevelSystem.h>                   // ILevelSystemListener
 
 extern int CryMemoryGetAllocatedSize();
 
@@ -124,15 +126,17 @@ void CTestSystemLegacy::ApplicationTest(const char* szParam)
 		return;
 	}
 
+	IGame* pGame = gEnv->pGame;
+
 	if (stricmp(m_sParameter.c_str(), "LevelStats") == 0)
-		if (gEnv->pGameFramework)
+		if (pGame)
 		{
 			static CLevelListener listener(*this);
 
 			if (m_bFirstUpdate)
 			{
 				DeactivateCrashDialog();
-				gEnv->pGameFramework->GetILevelSystem()->AddListener(&listener);
+				pGame->GetIGameFramework()->GetILevelSystem()->AddListener(&listener);
 			}
 		}
 
@@ -150,7 +154,7 @@ void CTestSystemLegacy::LogLevelStats()
 	char sVersion[128];
 	ver.ToString(sVersion);
 
-	GetILog()->Log("   LevelStats Level='%s'   Ver=%s", gEnv->pGameFramework->GetLevelName(), sVersion);
+	GetILog()->Log("   LevelStats Level='%s'   Ver=%s", gEnv->pGame->GetIGameFramework()->GetLevelName(), sVersion);
 
 	{
 		// copied from CBudgetingSystem::MonitorSystemMemory
@@ -197,6 +201,8 @@ void CTestSystemLegacy::Update()
 	if (m_sParameter.empty())
 		return;
 
+	IGame* pGame = gEnv->pGame;
+
 	if (m_bFirstUpdate)
 	{
 		if (stricmp(m_sParameter.c_str(), "TimeDemo") == 0)
@@ -224,6 +230,7 @@ void CTestSystemLegacy::BeforeRender()
 	if (m_sParameter.empty())
 		return;
 
+	IGame* pGame = gEnv->pGame;
 	I3DEngine* p3DEngine = gEnv->p3DEngine;
 	IRenderer* pRenderer = gEnv->pRenderer;
 
@@ -303,6 +310,8 @@ void CTestSystemLegacy::ScreenShot(const char* szDirectory, const char* szFilena
 //////////////////////////////////////////////////////////////////////////
 void CTestSystemLegacy::SetTimeDemoInfo(STimeDemoInfo* pTimeDemoInfo)
 {
+	ScopedSwitchToGlobalHeap useGlobalHeap;
+
 	if (m_pTimeDemoInfo)
 		delete[]m_pTimeDemoInfo->pFrames;
 	else

@@ -307,9 +307,10 @@ void frag_custom_begin(inout fragPass pPass)
 	pPass.pCustom.vHairDir = pPass.IN.vBinormal.xyz;
 	
 #if %DIRECTION_MAP
-	half3 vDirection = GetNormalMap(DirectionTex, pPass.IN.baseTC.xy);
-	pPass.pCustom.vHairDir = mul(vDirection.xyz, pPass.mTangentToWS);
-	fShiftAmount = vDirection.z * ShiftVariation;
+  half3 vDirectionMap = half3(GetXYNormalMap(DirectionTex, pPass.IN.baseTC.xy), 0);
+	vDirectionMap.xy = vDirectionMap.xy * 2 - 1;
+  pPass.pCustom.vHairDir = mul(vDirectionMap.xyz, pPass.mTangentToWS);
+	fShiftAmount = sqrt(saturate(1.h + dot(vDirectionMap.xy, -vDirectionMap.xy))) * ShiftVariation;  // Reconstructed z of direction
 #endif
 
   const half PrimarySpecShift = 0;
@@ -329,7 +330,7 @@ void frag_custom_begin(inout fragPass pPass)
 	// Soft intersection
 	if (SoftIntersection > 0)
 	{
-		float depthDiff = abs( pPass.IN.screenProj.w - GetLinearDepthScaledProj( sceneLinearDepthTex, pPass.IN.screenProj ) );
+		float depthDiff = abs( pPass.IN.screenProj.w - DecodeSceneDepth( sceneDepthSampler, pPass.IN.screenProj ) );
 		pPass.fAlpha *= saturate( lerp( 1, saturate( depthDiff * 100 ), SoftIntersection ) );
 	}
 
@@ -415,29 +416,21 @@ void frag_custom_ambient(inout fragPass pPass, inout half3 cAmbient)
 	
 	const float2 tcProj = pPass.IN.screenProj.xy / pPass.IN.screenProj.w;
 	const uint2 tileIdx = uint2( tcProj.x * numTiles.x, tcProj.y * numTiles.y );
-	const uint bufferIdx = (tileIdx.y * numTiles.x + tileIdx.x) * 8;
+	const uint bufferIdx = (tileIdx.y * numTiles.x + tileIdx.x) * TILED_SHADING_MAX_NUM_LIGHTS;
 	
 	float probeWeightSum = 0;
 	
-	int lightIndex = -1;
-	uint maskIndex = 0;
-	uint curMask = TileLightMask[bufferIdx];
-	
-	[loop] for (;;)
+	uint lightIter = 0;
+	[loop] for (lightIter = 0; lightIter < 8; ++lightIter)  // Restrict number of probes being considered
 	{
-		while (maskIndex < 8)
-		{
-			lightIndex = GetNextTileLightIndex(curMask, lightIndex);
-			if (lightIndex >= 0) break;
-			else curMask = TileLightMask[++maskIndex + bufferIdx];
-		}
+		const uint lightIndex = TileLightIndices[bufferIdx + lightIter];
 
 		[branch]
-		if (lightIndex < 0 || TiledLightsShadeInfo[lightIndex].lightType != TILEDLIGHT_TYPE_PROBE)
+		if (lightIndex >= TILED_SHADING_MAX_NUM_LIGHTS || TiledLightsShadeInfo[lightIndex].lightType != TILEDLIGHT_TYPE_PROBE)
 			break;
 			
 		STiledLightShadeInfo light = TiledLightsShadeInfo[lightIndex];
-		float3 lightVec = (light.posRad.xyz - GetWorldViewPos()) - pPass.IN.vView.xyz;
+		float3 lightVec = light.posRad.xyz - pPass.IN.vView.xyz;
 
 		// Compute attenuation for box
 		float3 tmpLightVec;
@@ -496,11 +489,8 @@ void frag_custom_end(inout fragPass pPass, inout half3 cFinal)
 		TiledForwardShading(pPass, false, false, false);
 	#endif
 #else
-	#if FEATURE_SVO_GI
-		float2 tcProj = pPass.IN.screenProj.xy / pPass.IN.screenProj.w;
-		ApplyGI(pPass.cSpecularAcc, pPass.cAmbientAcc, pPass.cDiffuseAcc, tcProj + .5f / PS_ScreenSize.xy, pPass.fGloss, pPass.cSpecularMap, 
-			ForwGiDiffuseRT, ForwGiSpecularRT, TrilinearClampSamplerState, (int)(ForwGiIntegrationMode.y));
-	#endif
+	float2 tcProj = pPass.IN.screenProj.xy / pPass.IN.screenProj.w;
+	ApplyGI(pPass.cSpecularAcc, pPass.cAmbientAcc, pPass.cDiffuseAcc, tcProj + .5f / PS_ScreenSize.xy, pPass.fGloss, pPass.cSpecularMap, ForwGiDiffuseRT, ForwGiSpecularRT, (int)(ForwGiIntegrationMode.y));
 #endif
 	
 	// Final composition
@@ -728,7 +718,26 @@ vert2fragZ_C ZPassVS(app2vertGBuffer IN)
   _TCModify(baseTC, OUT.baseTC, vertPassPos.Position, vertPassPos.ObjToTangentSpace[2], TS_DIFFUSE);	
 
   #if %_RT_ALPHATEST || %_RT_DISSOLVE
-	OUT.baseTC.wz = float2(Get_MaterialAlphaTest(),Get_SPI_Dissolve());
+    float4 fAlphaTest = 0.0f;
+    #if %_RT_DISSOLVE
+      // For dissolve and instancing, we use PI_AlphaTest
+      fAlphaTest = AlphaTest;
+      #if %_RT_INSTANCING_ATTR
+        {
+          float4 baseTC;
+          #fetchinst (baseTC = IN.InstAlphaTest, vertPassPos.nInstance);
+          fAlphaTest = baseTC;
+        }
+      #endif
+    #else
+      // For regular materials using alpha test, we use PB_AlphaTest
+	  int nInstance = 0;
+	#if %_RT_ENVIRONMENT_CUBEMAP
+	  nInstance = vertPassPos.nInstance;
+	#endif
+      fAlphaTest = Get_SPI_AlphaTest(nInstance);
+    #endif
+    OUT.baseTC.wz = fAlphaTest.wx;
   #endif
   
   return OUT;            
@@ -832,16 +841,8 @@ v2f_sh HairSG_VS(app2vertGeneral IN)
 	float4 HPosition = mul(g_VS_ViewProjMatr, vertPassPos.WorldPos);
 
 #if !%_RT_CUBEMAP0 
-	#if !%_RT_NEAREST
-		HPosition.z /= CP_ShadowGen_FrustumInfo.y;
-	#endif
-
-	#if %_RT_SAMPLE0
-		OUT.Depth = HPosition.z + CP_ShadowGen_DepthTestBias.x;
-	#endif
-	
-	#if !%_RT_NEAREST
-		HPosition.z *= HPosition.w;
+	#if %_RT_ALPHABLEND
+		OUT.Depth = HPosition.z;
 	#endif
 #else 
 	OUT.Depth = (HPosition.z/CP_ShadowGen_FrustumInfo.y);

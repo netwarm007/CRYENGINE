@@ -12,10 +12,6 @@
 	#endif
 #endif
 
-#if defined(USE_NV_API)
-	#include NV_API_HEADER
-#endif
-
 #include "../Common/Shaders/RemoteCompiler.h"
 
 static CryCriticalSection g_cAILock;
@@ -731,7 +727,7 @@ EVertexFormat CHWShader_D3D::mfVertexFormat(bool& bUseTangents, bool& bUseLM, bo
 	bUseTangents = (nStream & VSM_TANGENTS) != 0;
 	bUseLM = false;
 	bUseHWSkin = (nStream & VSM_HWSKIN) != 0;
-	assert(eVFormat < eVF_PreAllocated);
+	assert(eVFormat < eVF_Max);
 
 	return eVFormat;
 }
@@ -1157,7 +1153,7 @@ bool CHWShader_D3D::mfGetCacheTokenMap(FXShaderToken*& Table, TArray<uint32>*& p
 
 //==============================================================================================================================================================
 
-bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vector<SCGBind>& InstBindVars, uint32 nFlags, FXShaderToken* Table, TArray<uint32>* pSHData, TArray<char>& sNewScr)
+bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance*& pInst, std::vector<SCGBind>& InstBindVars, uint32 nFlags, FXShaderToken* Table, TArray<uint32>* pSHData, TArray<char>& sNewScr)
 {
 	char* cgs = NULL;
 
@@ -1221,19 +1217,6 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 	if (eT != eT_unknown)
 		CParserBin::AddDefineToken(eT, NewTokens);
 
-	uint32 nSFlags = m_Flags;
-	if (nSFlags & HWSG_GS_MULTIRES)
-	{
-		// Generate script vor VS first;
-		pInst = s_pCurInstVS;
-		assert(pInst);
-
-		CHWShader_D3D* curVS = (CHWShader_D3D *)s_pCurHWVS;
-		Table = &curVS->m_TokenTable;
-		pSHData = &curVS->m_TokenData;
-		nSFlags = curVS->m_Flags;
-	}
-
 	// Include runtime mask definitions in the script
 	SShaderGen* shg = gRenDev->m_cEF.m_pGlobalExt;
 	if (shg && pInst->m_Ident.m_RTMask)
@@ -1248,7 +1231,7 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 	}
 
 	// Include light mask definitions in the script
-	if (nSFlags & HWSG_SUPPORTS_MULTILIGHTS)
+	if (m_Flags & HWSG_SUPPORTS_MULTILIGHTS)
 	{
 		int nLights = pInst->m_Ident.m_LightMask & 0xf;
 		if (nLights)
@@ -1266,7 +1249,7 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 		if (bHasProj)
 			CParserBin::AddDefineToken(eT__LT_HASPROJ, eT_1, NewTokens);
 	}
-	else if (nSFlags & HWSG_SUPPORTS_LIGHTING)
+	else if (m_Flags & HWSG_SUPPORTS_LIGHTING)
 	{
 		CParserBin::AddDefineToken(eT__LT_LIGHTS, NewTokens);
 		int nLightType = (pInst->m_Ident.m_LightMask >> SLMF_LTYPE_SHIFT) & SLMF_TYPE_MASK;
@@ -1275,7 +1258,7 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 	}
 
 	// Include modificator mask definitions in the script
-	if ((nSFlags & HWSG_SUPPORTS_MODIF) && pInst->m_Ident.m_MDMask)
+	if ((m_Flags & HWSG_SUPPORTS_MODIF) && pInst->m_Ident.m_MDMask)
 	{
 		const uint32 tcProjMask = HWMD_TEXCOORD_PROJ;
 		const uint32 tcMatrixMask = HWMD_TEXCOORD_MATRIX;
@@ -1290,7 +1273,7 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 	}
 
 	// Include vertex modificator mask definitions in the script
-	if ((nSFlags & HWSG_SUPPORTS_VMODIF) && pInst->m_Ident.m_MDVMask)
+	if ((m_Flags & HWSG_SUPPORTS_VMODIF) && pInst->m_Ident.m_MDVMask)
 	{
 		int nMDV = pInst->m_Ident.m_MDVMask & 0x0fffffff;
 		int nType = nMDV & 0xf;
@@ -1317,7 +1300,7 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 			CParserBin::AddDefineToken(eT__VT_TYPE_MODIF, eT_1, NewTokens);
 	}
 
-	if (nSFlags & HWSG_FP_EMULATION)
+	if (m_Flags & HWSG_FP_EMULATION)
 	{
 		CParserBin::AddDefineToken(eT__FT0_COP, eT_0 + (pInst->m_Ident.m_LightMask & 0xff), NewTokens);
 		CParserBin::AddDefineToken(eT__FT0_AOP, eT_0 + ((pInst->m_Ident.m_LightMask & 0xff00) >> 8), NewTokens);
@@ -1380,14 +1363,6 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 	RemoveUnaffectedParameters_D3D10(Parser, pInst, InstBindVars);
 	ConvertBinScriptToASCII(Parser, pInst, InstBindVars, Table, sNewScr);
 
-	// Generate geometry shader
-	if (m_Flags & HWSG_GS_MULTIRES)
-	{
-		bool bResult = AutoGenMultiresGS(sNewScr, pSH);
-		if (!bResult)
-			return false;
-	}
-
 	if (bTempMap)
 	{
 		SAFE_DELETE(Table);
@@ -1402,102 +1377,6 @@ bool CHWShader_D3D::mfGenerateScript(CShader* pSH, SHWSInstance* pInst, std::vec
 	   }*/
 
 	return sNewScr.Num() && sNewScr[0];
-}
-
-bool CHWShader_D3D::AutoGenMultiresGS(TArray<char>& sNewScr, CShader *pSH)
-{
-	CHWShader_D3D* curVS = (CHWShader_D3D *)s_pCurHWVS;
-	char szEntryVS[128];
-	strcpy(szEntryVS, curVS->m_EntryFunc.c_str());
-	strcat(szEntryVS, "(");
-	char *szStart = strstr(&sNewScr[0], szEntryVS);
-	assert(szStart);
-	if (szStart)
-	{
-		char *szEnd = szStart - 1;
-		while (*szEnd == 0x20) --szEnd;
-		char *szS = szEnd;
-		while (*szS > 0x20) --szS;
-		char szStrName[128];
-		ptrdiff_t nSize = szEnd - szS;
-		strncpy(szStrName, &szS[1], nSize);
-		szStrName[nSize] = 0;
-
-		char szStruct[128];
-		strcpy(szStruct, "struct ");
-		strcat(szStruct, szStrName);
-		char *szStrStart = strstr(&sNewScr[0], szStruct);
-		assert(szStrStart);
-
-		char *szStrEnd = strstr(szStrStart, "};");
-		szStrEnd += 2;
-
-		char szPosName[128];
-		char *szPosA = strstr(szStrStart, ":POSITION");
-		if (!szPosA)
-			szPosA = strstr(szStrStart, ":SV_Position");
-		if (!szPosA)
-		{
-#if !defined(_RELEASE)
-			CRY_ASSERT_MESSAGE(false, "Cannot generate a GS for a VS with no SV_Position output");
-#endif
-			return false;
-		}
-		char *szPosAB = szPosA - 1;
-		while (*szPosAB == 0x20) --szPosAB;
-		char *szP = szPosAB;
-		while (*szP > 0x20) --szP;
-		nSize = szPosAB - szP;
-		strncpy(szPosName, &szP[1], nSize);
-		szPosName[nSize] = 0;
-
-		TArray<char> szNewS;
-		//szNewS.Copy(&sNewScr[0], szStrStart - &sNewScr[0]);
-		szNewS.Copy(szStrStart, uint32(szStrEnd-szStrStart)+1);
-
-		m_EntryFunc.Format("%s_GS", curVS->m_EntryFunc.c_str());
-
-		string GSDefine;
-		GSDefine.Format(
-			"#define NV_VR_FASTGS_FUNCTION_NAME %s\n"
-			"#define NV_VR_FASTGS_PASSTHROUGH_STRUCT %s\n"
-			"#define NV_VR_FASTGS_OUTPUT_STRUCT %s_gs\n"
-			"#define NV_VR_FASTGS_POSITION_ATTRIBUTE %s\n\n",
-			m_EntryFunc.c_str(), szStrName, szStrName, szPosName);
-		szNewS.Copy(GSDefine.c_str(), GSDefine.size());
-
-		ShaderTokensVec NewTokens;
-
-		uint32 eT = eT__GS;
-		CParserBin::AddDefineToken(eT, NewTokens);
-
-		// Include runtime mask definitions in the script
-		SShaderGen* shg = gRenDev->m_cEF.m_pGlobalExt;
-		if (shg && m_pCurInst->m_Ident.m_RTMask)
-		{
-			for (uint32 i = 0; i < shg->m_BitMask.Num(); i++)
-			{
-				SShaderGenBit* bit = shg->m_BitMask[i];
-				if (!(bit->m_Mask & m_pCurInst->m_Ident.m_RTMask))
-					continue;
-				CParserBin::AddDefineToken(bit->m_dwToken, NewTokens);
-			}
-		}
-		int nT = NewTokens.size();
-		NewTokens.resize(nT + m_TokenData.size());
-		memcpy(&NewTokens[nT], &m_TokenData[0], m_TokenData.size() * sizeof(uint32));
-
-		std::vector<SCGBind> InstBindVars;
-		CParserBin Parser(NULL, pSH);
-		Parser.Preprocess(1, NewTokens, &m_TokenTable);
-		ConvertBinScriptToASCII(Parser, m_pCurInst, InstBindVars, &m_TokenTable, szNewS);
-
-		sNewScr.Copy(szNewS);
-	}
-	else
-		return false;
-
-	return true;
 }
 
 /*static uint32 sFindVar(CParserBin& Parser, int& nStart)
@@ -2150,6 +2029,55 @@ SShaderDevCache* CHWShader::mfInitDevCache(const char* name, CHWShader* pSH)
 	return pCache;
 }
 
+#include <lzss/LZSS.H>
+
+SShaderCacheHeaderItem* CHWShader_D3D::mfGetCompressedItem(uint32 nFlags, int32& nSize)
+{
+	SHWSInstance* pInst = m_pCurInst;
+	/*if (pInst->m_GLMask == 0x200000000 && pInst->m_RTMask == 0x800000000000)
+	   {
+	   int nnn = 0;
+	   }*/
+	char name[128];
+	{
+		cry_strcpy(name, GetName());
+		char* s = strchr(name, '(');
+		if (s)
+			s[0] = 0;
+	}
+	CCryNameTSCRC Name = name;
+	FXCompressedShadersItor it = CHWShader::m_CompressedShaders.find(Name);
+	if (it == CHWShader::m_CompressedShaders.end())
+		return NULL;
+	SHWActivatedShader* pAS = it->second;
+	assert(pAS);
+	if (!pAS)
+		return NULL;
+	mfGenName(pInst, name, 128, 1);
+	Name = name;
+	FXCompressedShaderRemapItor itR = pAS->m_Remap.find(Name);
+	if (itR == pAS->m_Remap.end())
+		return NULL;
+	int nDevID = itR->second;
+	FXCompressedShaderItor itS = pAS->m_CompressedShaders.find(nDevID);
+	if (itS == pAS->m_CompressedShaders.end())
+		return NULL;
+	SCompressedData& CD = itS->second;
+	assert(CD.m_pCompressedShader);
+	if (!CD.m_pCompressedShader)
+		return NULL;
+	byte* pData = new byte[CD.m_nSizeDecompressedShader];
+	if (!pData)
+		return NULL;
+	pInst->m_DeviceObjectID = nDevID;
+	Decodem(CD.m_pCompressedShader, pData, CD.m_nSizeCompressedShader);
+	SShaderCacheHeaderItem* pIt = (SShaderCacheHeaderItem*)pData;
+	if (CParserBin::m_bEndians)
+		SwapEndian(*pIt, eBigEndian);
+	nSize = CD.m_nSizeDecompressedShader;
+	return pIt;
+}
+
 SShaderCacheHeaderItem* CHWShader_D3D::mfGetCacheItem(uint32& nFlags, int32& nSize)
 {
 	LOADING_TIME_PROFILE_SECTION(gEnv->pSystem);
@@ -2642,11 +2570,7 @@ bool CHWShader::_OpenCacheFile(float fVersion, SShaderCache* pCache, CHWShader* 
 		if (nCache == CACHE_USER && !bReadOnly)
 		{
 			if (!pRF->mfOpen(RA_CREATE | (CParserBin::m_bEndians ? RA_ENDIANS : 0), &gRenDev->m_cEF.m_ResLookupDataMan[nCache]))
-			{
-				pRF->mfClose();
-				SAFE_DELETE(pRF);
 				return false;
-			}
 
 			SResFileLookupData* pLookup = pRF->GetLookupData(true, CRC32, (float)FX_CACHE_VER);
 			if (pSHHW)
@@ -2853,7 +2777,7 @@ bool CHWShader_D3D::mfUploadHW(SHWSInstance* pInst, byte* pBuf, uint32 nSize, CS
 	if (!pInst->m_Handle.m_pShader)
 		pInst->m_Handle.SetShader(new SD3DShader);
 
-	if ((m_eSHClass == eHWSC_Vertex) && (!(nFlags & HWSF_PRECACHE)) && !pInst->m_bFallback)
+	if ((m_eSHClass == eHWSC_Vertex) && (!(nFlags & HWSF_PRECACHE) || gRenDev->m_cEF.m_bActivatePhase) && !pInst->m_bFallback)
 		mfUpdateFXVertexFormat(pInst, pSH);
 
 	pInst->m_nDataSize = nSize;
@@ -2867,31 +2791,7 @@ bool CHWShader_D3D::mfUploadHW(SHWSInstance* pInst, byte* pBuf, uint32 nSize, CS
 	else if (m_eSHClass == eHWSC_Vertex)
 		hr = gcpRendD3D->GetDevice().CreateVertexShader(alias_cast<DWORD*>(pBuf), nSize, NULL, alias_cast<ID3D11VertexShader**>(&pInst->m_Handle.m_pShader->m_pHandle));
 	else if (m_eSHClass == eHWSC_Geometry)
-		{
-#if 1 // use 0 for FastGS emulation mode
-			if (m_Flags & HWSG_GS_MULTIRES)
-			{
-#if defined(USE_NV_API)
-				if (CVrProjectionManager::IsMultiResEnabledStatic())
-				{
-					NvAPI_D3D11_CREATE_FASTGS_EXPLICIT_DESC FastGSArgs = { NVAPI_D3D11_CREATEFASTGSEXPLICIT_VER, NV_FASTGS_USE_VIEWPORT_MASK };
-					NvAPI_Status Status = NvAPI_D3D11_CreateFastGeometryShaderExplicit(gcpRendD3D->GetDevice().GetRealDevice(), alias_cast<DWORD*>(pBuf), nSize, NULL, &FastGSArgs, alias_cast<ID3D11GeometryShader**>(&pInst->m_Handle.m_pShader->m_pHandle));
-					hr = (Status == NVAPI_OK) ? S_OK : E_FAIL;
-				}
-				else
-#endif
-				{
-					pInst->m_Handle.m_pShader->m_bDisabled = true;
-					pInst->m_Handle.m_pShader->m_pHandle = nullptr;
-					hr = S_OK;
-				}
-			}
-			else
-#endif
-			{
-    			hr = gcpRendD3D->GetDevice().CreateGeometryShader(alias_cast<DWORD*>(pBuf), nSize, NULL, alias_cast<ID3D11GeometryShader**>(&pInst->m_Handle.m_pShader->m_pHandle));
-			}
-		}
+		hr = gcpRendD3D->GetDevice().CreateGeometryShader(alias_cast<DWORD*>(pBuf), nSize, NULL, alias_cast<ID3D11GeometryShader**>(&pInst->m_Handle.m_pShader->m_pHandle));
 	else if (m_eSHClass == eHWSC_Hull)
 		hr = gcpRendD3D->GetDevice().CreateHullShader(alias_cast<DWORD*>(pBuf), nSize, NULL, alias_cast<ID3D11HullShader**>(&pInst->m_Handle.m_pShader->m_pHandle));
 	else if (m_eSHClass == eHWSC_Compute)
@@ -2910,17 +2810,10 @@ bool CHWShader_D3D::mfUploadHW(SHWSInstance* pInst, byte* pBuf, uint32 nSize, CS
 #endif
 
 	// Assign name to Shader for enhanced debugging
-#if !defined(RELEASE) && (CRY_PLATFORM_WINDOWS || CRY_PLATFORM_ORBIS)
-	if (pInst->m_Handle.m_pShader->m_pHandle)
-	{
-		char name[1024];
-		sprintf(name, "%s_%s(LT%x)@(RT%llx)(MD%x)(MDV%x)(GL%llx)(PSS%llx)", pSH->GetName(), m_EntryFunc.c_str(), pInst->m_Ident.m_LightMask, pInst->m_Ident.m_RTMask, pInst->m_Ident.m_MDMask, pInst->m_Ident.m_MDVMask, pInst->m_Ident.m_GLMask, pInst->m_Ident.m_pipelineState.opaque);
-		#if CRY_PLATFORM_WINDOWS
-		((ID3D11DeviceChild*)pInst->m_Handle.m_pShader->m_pHandle)->SetPrivateData(WKPDID_D3DDebugObjectName, strlen(name), name);
-		#elif CRY_PLATFORM_ORBIS && !defined(CRY_USE_GNM_RENDERER)
-		((CCryDXOrbisShader*)pInst->m_Handle.m_pShader->m_pHandle)->DebugSetName(name);
-		#endif
-	}
+#if !defined(RELEASE) && CRY_PLATFORM_WINDOWS
+	char name[1024];
+	sprintf(name, "%s_%s(LT%x)@(RT%llx)(MD%x)(MDV%x)(GL%llx)(PSS%llx)", pSH->GetName(), m_EntryFunc.c_str(), pInst->m_Ident.m_LightMask, pInst->m_Ident.m_RTMask, pInst->m_Ident.m_MDMask, pInst->m_Ident.m_MDVMask, pInst->m_Ident.m_GLMask, pInst->m_Ident.m_pipelineState.opaque);
+	((ID3D11DeviceChild*)pInst->m_Handle.m_pShader->m_pHandle)->SetPrivateData(WKPDID_D3DDebugObjectName, strlen(name), name);
 #endif
 
 	return (hr == S_OK);
@@ -2934,7 +2827,7 @@ bool CHWShader_D3D::mfUploadHW(LPD3D10BLOB pShader, SHWSInstance* pInst, CShader
 	if (pShader && !(m_Flags & HWSG_PRECACHEPHASE))
 	{
 		DWORD* pCode = (DWORD*)pShader->GetBufferPointer();
-		if (gcpRendD3D->m_cEF.m_nCombinationsProcess >= 0)
+		if (gcpRendD3D->m_cEF.m_nCombinationsProcess >= 0 && !gcpRendD3D->m_cEF.m_bActivatePhase)
 		{
 			pInst->m_Handle.SetFake();
 		}
@@ -3005,19 +2898,19 @@ bool CHWShader_D3D::mfActivateCacheItem(CShader* pSH, SShaderCacheHeaderItem* pI
 		if (m_eSHClass == eHWSC_Vertex)
 		{
 			ID3D10Blob* pS = NULL;
-			D3DCreateBlob(nSize, (LPD3D10BLOB*)&pS);
+			D3D10CreateBlob(nSize, (LPD3D10BLOB*)&pS);
 			DWORD* pBuffer = (DWORD*)pS->GetBufferPointer();
 			memcpy(pBuffer, pBuf, nSize);
 			mfVertexFormat(pInst, this, pS);
 			SAFE_RELEASE(pS);
 		}
 #endif
-		if ((m_eSHClass == eHWSC_Vertex) && (!(nFlags & HWSF_PRECACHE)) && !pInst->m_bFallback)
+		if ((m_eSHClass == eHWSC_Vertex) && (!(nFlags & HWSF_PRECACHE) || gRenDev->m_cEF.m_bActivatePhase) && !pInst->m_bFallback)
 			mfUpdateFXVertexFormat(pInst, pSH);
 	}
 	else
 	{
-		if (gcpRendD3D->m_cEF.m_nCombinationsProcess > 0)
+		if (gcpRendD3D->m_cEF.m_nCombinationsProcess > 0 && !gcpRendD3D->m_cEF.m_bActivatePhase)
 		{
 			pInst->m_Handle.SetFake();
 		}
@@ -3027,7 +2920,7 @@ bool CHWShader_D3D::mfActivateCacheItem(CShader* pSH, SShaderCacheHeaderItem* pI
 			if (m_eSHClass == eHWSC_Vertex)
 			{
 				ID3D10Blob* pS = NULL;
-				D3DCreateBlob(nSize, (LPD3D10BLOB*)&pS);
+				D3D10CreateBlob(nSize, (LPD3D10BLOB*)&pS);
 				DWORD* pBuffer = (DWORD*)pS->GetBufferPointer();
 				memcpy(pBuffer, pBuf, nSize);
 				mfVertexFormat(pInst, this, pS);
@@ -3112,15 +3005,18 @@ bool CHWShader_D3D::mfCreateCacheItem(SHWSInstance* pInst, std::vector<SCGBind>&
 	CCryNameTSCRC nm = CCryNameTSCRC(name);
 	bool bRes = mfAddCacheItem(pSH->m_pGlobalCache, &h, pNewData, (int)(pP - pNewData), false, nm);
 	SAFE_DELETE_ARRAY(pNewData);
-	if ((!(pSH->m_Flags & HWSG_PRECACHEPHASE) && gRenDev->m_cEF.m_nCombinationsProcess <= 0))
+	if (gRenDev->m_cEF.m_bActivatePhase || (!(pSH->m_Flags & HWSG_PRECACHEPHASE) && gRenDev->m_cEF.m_nCombinationsProcess <= 0))
 	{
-		if (bShaderThread && false)
+		if (!gRenDev->m_cEF.m_bActivatePhase)
 		{
-			if (pInst->m_pAsync)
-				pInst->m_pAsync->m_bPendedFlush = true;
+			if (bShaderThread && false)
+			{
+				if (pInst->m_pAsync)
+					pInst->m_pAsync->m_bPendedFlush = true;
+			}
+			else
+				pSH->mfFlushCacheFile();
 		}
-		else
-			pSH->mfFlushCacheFile();
 		cry_strcpy(name, pSH->GetName());
 		char* s = strchr(name, '(');
 		if (s)
@@ -3249,20 +3145,10 @@ void SShaderAsyncInfo::FlushPendingShaders()
 		CHWShader_D3D* pSH = pAI->m_pShader;
 		if (pSH)
 		{
-			SShaderCombIdent Ident;
-			Ident.m_GLMask = pSH->m_nMaskGenShader;
-			Ident.m_LightMask = pAI->m_LightMask;
-			Ident.m_RTMask = pAI->m_RTMask;
-			Ident.m_MDMask = pAI->m_MDMask;
-			Ident.m_MDVMask = pAI->m_MDVMask;
-			Ident.m_pipelineState.opaque = pAI->m_pipelineState.opaque;
-			CHWShader_D3D::SHWSInstance* pInst = pSH->mfGetInstance(pAI->m_pFXShader, pAI->m_nHashInstance, Ident);
-			if (pInst)
-			{
-				if (pInst->m_pAsync != pAI)
-					CryFatalError("Shader instance async info doesn't match queued async info.");
-				pSH->mfAsyncCompileReady(pInst);
-			}
+			CHWShader_D3D::SHWSInstance* pInst = pSH->mfGetInstance(pAI->m_pFXShader, pAI->m_nHashInst, pSH->m_nMaskGenShader);
+			if (pInst->m_pAsync != pAI)
+				CryFatalError("Shader instance async info doesn't match queued async info.");
+			pSH->mfAsyncCompileReady(pInst);
 		}
 	}
 }
@@ -3461,7 +3347,7 @@ bool CHWShader_D3D::mfRequestAsync(CShader* pSH, SHWSInstance* pInst, std::vecto
 	pInst->m_pAsync->m_nCombination = gRenDev->m_cEF.m_nCombinationsProcess;
 	assert(!stricmp(m_NameSourceFX.c_str(), pInst->m_pAsync->m_pFXShader->m_NameFile.c_str()));
 	InstContainer* pInstCont = &m_Insts;
-	pInst->m_pAsync->m_nHashInstance = pInst->m_Ident.m_nHash;
+	pInst->m_pAsync->m_nHashInst = pInst->m_Ident.m_nHash;
 	pInst->m_pAsync->m_RTMask = pInst->m_Ident.m_RTMask;
 	pInst->m_pAsync->m_LightMask = pInst->m_Ident.m_LightMask;
 	pInst->m_pAsync->m_MDMask = pInst->m_Ident.m_MDMask;
@@ -3593,7 +3479,7 @@ bool CHWShader_D3D::mfCompileHLSL_Int(CShader* pSH, char* prog_text, LPD3D10BLOB
 			return false;
 		}
 
-		D3DCreateBlob(Data.size(), (LPD3D10BLOB*)ppShader);
+		D3D10CreateBlob(Data.size(), (LPD3D10BLOB*)ppShader);
 		LPD3D10BLOB pShader = (LPD3D10BLOB) *ppShader;
 		DWORD* pBuf = (DWORD*) pShader->GetBufferPointer();
 		memcpy(pBuf, &Data[0], Data.size());
@@ -3908,7 +3794,7 @@ bool CHWShader_D3D::mfCreateShaderEnv(int nThread, SHWSInstance* pInst, LPD3D10B
 }
 
 // Compile pixel/vertex shader for the current instance properties
-bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table, TArray<uint32>* pSHData)
+bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table, TArray<uint32>* pSHData, bool bCompressedOnly)
 {
 	PROFILE_FRAME(Shader_HWShaderActivate);
 
@@ -3947,7 +3833,15 @@ bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table
 			m_pDevCache = mfInitDevCache(nameCache, this);
 
 		int32 nSize;
-		SShaderCacheHeaderItem* pCacheItem = NULL;
+		SShaderCacheHeaderItem* pCacheItem = mfGetCompressedItem(nFlags, nSize);
+		if (pCacheItem)
+			pInst->m_bCompressed = true;
+		else if (bCompressedOnly)
+		{
+			// don't activate if shader isn't found in compressed shader data
+			return false;
+		}
+		else
 		{
 			// if shader compiling is enabled, make sure the user folder shader caches are also available
 			bool bReadOnly = CRenderer::CV_r_shadersAllowCompilation == 0;
@@ -3960,7 +3854,7 @@ bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table
 					bAsync = false;
 				m_pGlobalCache = mfInitCache(nameCache, this, true, m_CRC32, bReadOnly, bAsync);
 			}
-			if (gRenDev->m_cEF.m_nCombinationsProcess >= 0)
+			if (gRenDev->m_cEF.m_nCombinationsProcess >= 0 && !gRenDev->m_cEF.m_bActivatePhase)
 			{
 				mfGetDstFileName(pInst, this, nameCache, 256, 0);
 				fpStripExtension(nameCache, nameCache);
@@ -3975,7 +3869,7 @@ bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table
 		{
 			if (Table && CRenderer::CV_r_shadersAllowCompilation)
 				mfGetCacheTokenMap(Table, pSHData, m_nMaskGenShader);
-			if (((m_Flags & HWSG_PRECACHEPHASE) || gRenDev->m_cEF.m_nCombinationsProcess >= 0))
+			if (((m_Flags & HWSG_PRECACHEPHASE) || gRenDev->m_cEF.m_nCombinationsProcess >= 0) && !gRenDev->m_cEF.m_bActivatePhase)
 			{
 				byte* pData = (byte*)pCacheItem;
 				SAFE_DELETE_ARRAY(pData);
@@ -3985,12 +3879,59 @@ bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table
 			byte* pData = (byte*)pCacheItem;
 			SAFE_DELETE_ARRAY(pData);
 			pCacheItem = NULL;
+			if (CRenderer::CV_r_shaderspreactivate == 2 && !gRenDev->m_cEF.m_bActivatePhase)
+			{
+				t0 = gEnv->pTimer->GetAsyncCurTime() - t0;
+				iLog->Log(
+				  "Warning: Shader activation (%.3f ms): %s"
+#if defined(__GNUC__)
+				  "(%llx)"
+#else
+				  "(%I64x)"
+#endif
+				  "(%x)(%x)(%x)(%llx)(%s)...", t0 * 1000.0f,
+				  GetName(), pInst->m_Ident.m_RTMask, pInst->m_Ident.m_LightMask, pInst->m_Ident.m_MDMask, pInst->m_Ident.m_MDVMask, pInst->m_Ident.m_pipelineState.opaque, mfProfileString(pInst->m_eClass));
+				char name[256];
+				cry_strcpy(name, GetName());
+				char* s = strchr(name, '(');
+				if (s) s[0] = 0;
+				string pName;
+				SShaderCombIdent Ident(m_nMaskGenFX, pInst->m_Ident);
+				gRenDev->m_cEF.mfInsertNewCombination(Ident, pInst->m_eClass, name, 0, &pName, false);
+				iLog->Log(
+				  "...Shader list entry: %s "
+#if defined(__GNUC__)
+				  "(%llx)"
+#else
+				  "(%I64x)"
+#endif
+				  , pName.c_str(), m_nMaskGenFX);
+			}
 			if (bRes)
 				return (pInst->m_Handle.m_pShader != NULL);
 			pCacheItem = NULL;
 		}
-		else if (pCacheItem && pCacheItem->m_Class == 255 && (nFlags & HWSF_PRECACHE) == 0)
+		else if (pCacheItem && pCacheItem->m_Class == 255)
 		{
+			byte* pData = (byte*)pCacheItem;
+			SAFE_DELETE_ARRAY(pData);
+			pCacheItem = NULL;
+			return false;
+		}
+		else if (gRenDev->m_cEF.m_bActivatePhase)
+		{
+			if (CRenderer::CV_r_shadersdebug > 0)
+			{
+				iLog->Log(
+				  "Warning: Shader %s"
+#if defined(__GNUC__)
+				  "(%llx)"
+#else
+				  "(%I64x)"
+#endif
+				  "(%x)(%x)(%x)(%llx)(%s) wasn't compiled before preactivating phase",
+				  GetName(), pInst->m_Ident.m_RTMask, pInst->m_Ident.m_LightMask, pInst->m_Ident.m_MDMask, pInst->m_Ident.m_MDVMask, pInst->m_Ident.m_pipelineState.opaque, mfProfileString(pInst->m_eClass));
+			}
 			byte* pData = (byte*)pCacheItem;
 			SAFE_DELETE_ARRAY(pData);
 			pCacheItem = NULL;
@@ -4030,7 +3971,7 @@ bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table
 			ASSERT_IN_SHADER(bScriptSuccess);
 		}
 
-		if (!pInst->m_bAsyncActivating)
+		if (!pInst->m_bAsyncActivating && !bCompressedOnly)
 		{
 			// report miss in global cache to log and/or callback
 			mfLogShaderCacheMiss(pInst);
@@ -4077,8 +4018,7 @@ bool CHWShader_D3D::mfActivate(CShader* pSH, uint32 nFlags, FXShaderToken* Table
 	else if (pSHData)
 		mfGetCacheTokenMap(Table, pSHData, m_nMaskGenShader);
 
-	ED3DShError shResult = mfIsValid(pInst, true);
-	bool bSuccess = (shResult == ED3DShError_Ok) || (shResult == ED3DShError_Fake);
+	bool bSuccess = (mfIsValid(pInst, true) == ED3DShError_Ok);
 
 	return bSuccess;
 }
@@ -4244,7 +4184,7 @@ bool CAsyncShaderTask::CompileAsyncShader(SShaderAsyncInfo* pAsync)
 		if (NRemoteCompiler::ESOK != NRemoteCompiler::CShaderSrv::Instance().Compile(Data, pAsync->m_Profile, pAsync->m_Text.c_str(), pAsync->m_Name.c_str(), sCompiler.c_str(), pAsync->m_RequestLine.c_str()))
 		{
 
-			D3DCreateBlob(sizeof("D3DXCompileShader failed"), (LPD3D10BLOB*)&pAsync->m_pErrors);
+			D3D10CreateBlob(sizeof("D3DXCompileShader failed"), (LPD3D10BLOB*)&pAsync->m_pErrors);
 			DWORD* pBuf = (DWORD*) pAsync->m_pErrors->GetBufferPointer();
 			memcpy(pBuf, "D3DXCompileShader failed", sizeof("D3DXCompileShader failed"));
 
@@ -4267,7 +4207,7 @@ bool CAsyncShaderTask::CompileAsyncShader(SShaderAsyncInfo* pAsync)
 		}
 
 		HRESULT hr = S_OK;
-		D3DCreateBlob(Data.size(), (LPD3D10BLOB*) &pAsync->m_pDevShader);
+		D3D10CreateBlob(Data.size(), (LPD3D10BLOB*) &pAsync->m_pDevShader);
 		LPD3D10BLOB pShader = (LPD3D10BLOB)*&pAsync->m_pDevShader;
 		DWORD* pBuf = (DWORD*)pShader->GetBufferPointer();
 		memcpy(pBuf, &Data[0], Data.size());
@@ -4942,3 +4882,19 @@ const char* CHWShader::GetCurrentShaderCombinations(bool bForLevel)
 	return pPtr;
 }
 
+bool CHWShader::PreactivateShaders()
+{
+	bool bRes = true;
+
+	if (CRenderer::CV_r_shaderspreactivate)
+	{
+		gRenDev->m_pRT->RC_PreactivateShaders();
+	}
+
+	return bRes;
+}
+
+void CHWShader::RT_PreactivateShaders()
+{
+	gRenDev->m_cEF.mfPreloadBinaryShaders();
+}

@@ -1,9 +1,10 @@
 // Copyright 2001-2016 Crytek GmbH / Crytek Group. All rights reserved.
 
 using System;
-using System.IO;
 using System.Runtime.Serialization.Json;
+using System.IO;
 using System.Text;
+using CryEngine.Common;
 
 namespace CryEngine
 {
@@ -51,14 +52,72 @@ namespace CryEngine
 	}
 
 	/// <summary>
-	/// Automatically updates delta time between frames. Can be used to normalize variable changes by current FPS.
+	/// Provides some math for convenience.
+	/// </summary>
+	public static class Utils
+	{
+		public const float Deg2RadMul = (float)Math.PI / 180f;
+
+		/// <summary>
+		/// Convert degrees to radiants.
+		/// </summary>
+		/// <returns>The Radiant.</returns>
+		/// <param name="degrees">Degrees.</param>
+		public static float Deg2Rad(float degrees)
+		{
+			return degrees * Deg2RadMul; 
+		}
+
+		/// <summary>
+		/// Convert Radiants to degrees.
+		/// </summary>
+		/// <returns>The degree.</returns>
+		/// <param name="rad">RAD.</param>
+		public static float Rad2Deg(float rad)
+		{
+			return rad / Deg2RadMul;
+		}
+	}
+
+	/// <summary>
+	/// Automatically updated frametime. Can be used to normalize variable changes by current FPS.
 	/// </summary>
 	public static class FrameTime
 	{
+		private static float _frameTime;
+
 		/// <summary>
 		/// Gets the last calculated frametime in seconds.
 		/// </summary>
 		/// <returns>The last.</returns>
-		public static float Delta { get; internal set; }
+		public static float Current { get { return _frameTime; } }
+
+		/// <summary>
+		/// Retrieves the last frametime from engine. Called internally.
+		/// </summary>
+		public static void Update()
+		{			
+			_frameTime = Env.Timer.GetFrameTime();
+		}
+
+		/// <summary>
+		/// Normalizes a value.
+		/// </summary>
+		/// <returns>Returning argument multiplied with frametime.</returns>
+		/// <param name="value">Absolute value.</param>
+		public static float Normalize(float value)
+		{
+			return value * _frameTime;
+		}
+
+		/// <summary>
+		/// Normalizes a Vector.
+		/// </summary>
+		/// <returns>Returning argument multiplied with frametime.</returns>
+		/// <param name="value">Absolute value.</param>
+		public static Vec3 Normalize(Vec3 value)
+		{
+			return value * _frameTime;
+		}
 	}
 }

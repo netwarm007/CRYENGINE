@@ -25,12 +25,11 @@
 #include <CryAISystem/IAIObject.h>
 #include <CryAISystem/IAIActor.h>
 #include <CryGame/IGameFramework.h>
-
-#include <../CryAction/IActorSystem.h>
+#include "IActorSystem.h"
 #define HEAD_BONE_NAME "Bip01 Head"
-#include <../CryAction/ICryMannequinDefs.h>
-#include <../CryAction/ICryMannequin.h>
-#include <../CryAction/IAnimatedCharacter.h>
+#include "ICryMannequinDefs.h"
+#include "ICryMannequin.h"
+#include "IAnimatedCharacter.h"
 
 #define s_nodeParamsInitialized s_nodeParamsInitializedEnt
 #define s_nodeParams            s_nodeParamsEnt
@@ -55,7 +54,7 @@ static const char* s_VariablePrefixes[] =
 	"aianchor",                                                 "soclass",         "soclasses",   "sostate",      "sostates"
 	                                                                                                              "sopattern", "soaction",        "sohelper",    "sonavhelper",
 	"soanimhelper",                                             "soevent",         "sotemplate",  "customaction",
-	"gametoken",                                                "seq_",            "mission_",    "seqid_", "lightanimation_"
+	"gametoken",                                                "seq_",            "mission_",    "seqid_"
 };
 
 namespace
@@ -90,7 +89,7 @@ bool CompareRotation(const Quat& q1, const Quat& q2, float epsilon)
 {
 	return (fabs_tpl(q1.v.x - q2.v.x) <= epsilon)
 	       && (fabs_tpl(q1.v.y - q2.v.y) <= epsilon)
-	       && (fabs_tpl(q1.v.z - q2.v.z) <= epsilon)
+	       && (fabs_tpl(q2.v.z - q2.v.z) <= epsilon)
 	       && (fabs_tpl(q1.w - q2.w) <= epsilon);
 }
 
@@ -155,7 +154,8 @@ CAnimEntityNode::CAnimEntityNode(const int id) : CAnimNode(id)
 	SetSkipInterpolatedCameraNode(false);
 
 	m_lastEntityKey = -1;
-	m_lastDrsSignalKey = -1;
+	m_lastAudioFileKey = -1;
+	m_lastdrsSignalKey = -1;
 	m_iCurMannequinKey = -1;
 
 	CAnimEntityNode::Initialize();
@@ -166,16 +166,14 @@ void CAnimEntityNode::Initialize()
 	if (!s_nodeParamsInitialized)
 	{
 		s_nodeParamsInitialized = true;
-		s_nodeParams.reserve(19);
+		s_nodeParams.reserve(15);
 		AddSupportedParam(s_nodeParams, "Position", eAnimParamType_Position, eAnimValue_Vector);
 		AddSupportedParam(s_nodeParams, "Rotation", eAnimParamType_Rotation, eAnimValue_Quat);
 		AddSupportedParam(s_nodeParams, "Scale", eAnimParamType_Scale, eAnimValue_Vector);
 		AddSupportedParam(s_nodeParams, "Visibility", eAnimParamType_Visibility, eAnimValue_Bool);
 		AddSupportedParam(s_nodeParams, "Event", eAnimParamType_Event, eAnimValue_Unknown);
-		AddSupportedParam(s_nodeParams, "Audio/Trigger", eAnimParamType_AudioTrigger, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
-		AddSupportedParam(s_nodeParams, "Audio/File", eAnimParamType_AudioFile, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
-		AddSupportedParam(s_nodeParams, "Audio/Parameter", eAnimParamType_AudioParameter, eAnimValue_Float, eSupportedParamFlags_MultipleTracks);
-		AddSupportedParam(s_nodeParams, "Audio/Switch", eAnimParamType_AudioSwitch, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
+		AddSupportedParam(s_nodeParams, "Audio Trigger", eAnimParamType_AudioTrigger, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
+		AddSupportedParam(s_nodeParams, "Audio File", eAnimParamType_AudioFile, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
 		AddSupportedParam(s_nodeParams, "Dynamic Response Signal", eAnimParamType_DynamicResponseSignal, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
 		AddSupportedParam(s_nodeParams, "Animation", eAnimParamType_Animation, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
 		AddSupportedParam(s_nodeParams, "Mannequin", eAnimParamType_Mannequin, eAnimValue_Unknown, eSupportedParamFlags_MultipleTracks);
@@ -536,8 +534,8 @@ void CAnimEntityNode::InitializeTrackDefaultValue(IAnimTrack* pTrack, const CAni
 
 void CAnimEntityNode::CreateDefaultTracks()
 {
-	CreateTrack(eAnimParamType_Position);
-	CreateTrack(eAnimParamType_Rotation);
+	// Default tracks for Entities are controlled through the toolbar menu
+	// in MannequinDialog.
 }
 
 CAnimEntityNode::~CAnimEntityNode()
@@ -696,9 +694,11 @@ void CAnimEntityNode::EnableEntityPhysics(bool bEnable)
 {
 	if (IEntity* pEntity = GetEntity())
 	{
-		if (pEntity->IsPhysicsEnabled() != bEnable)
+		IEntityPhysicalProxy* pPhysicalProxy = (IEntityPhysicalProxy*)pEntity->GetProxy(ENTITY_PROXY_PHYSICS);
+
+		if (pPhysicalProxy && pPhysicalProxy->IsPhysicsEnabled() != bEnable)
 		{
-			pEntity->EnablePhysics(bEnable);
+			pPhysicalProxy->EnablePhysics(bEnable);
 
 			if (bEnable)
 			{
@@ -725,10 +725,6 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 		pEntity->CreateProxy(ENTITY_PROXY_ENTITYNODE);
 	}
 
-	// Here in Animate always get local pos, rot, scale value instead of pEntity->GetScale, to avoid comparing Track View value, to Track View value, which will always be the same.
-	// pEntity->GetPos,pEntity->GetRotation, pEntity->GetScale are updated before this, by delegated mode, from Track View key value
-	// pPosTrack->GetValue == pEntity->GetPos etc
-
 	Vec3 pos = m_pos;
 	Quat rotate = m_rotate;
 	Vec3 scale = m_scale;
@@ -753,10 +749,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 	int animCharacterLayer = 0;
 	int animationTrack = 0;
-	size_t numAudioFileTracks = 0;
-	size_t numAudioSwitchTracks = 0;
-	size_t numAudioTriggerTracks = 0;
-	size_t numAudioParameterTracks = 0;
+	size_t nNumAudioTracks = 0;
 	const int trackCount = NumTracks();
 
 	for (int paramIndex = 0; paramIndex < trackCount; paramIndex++)
@@ -764,7 +757,6 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 		CAnimParamType paramType = m_tracks[paramIndex]->GetParameterType();
 		IAnimTrack* pTrack = m_tracks[paramIndex];
 
-		const bool bMute = gEnv->IsEditor() && (pTrack->GetFlags() & IAnimTrack::eAnimTrackFlags_Muted);
 		if ((pTrack->HasKeys() == false && pTrack->GetParameterType() != eAnimParamType_Visibility
 		     && !IsSkipInterpolatedCameraNodeEnabled())
 		    || (pTrack->GetFlags() & IAnimTrack::eAnimTrackFlags_Disabled)
@@ -780,16 +772,16 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 			if (!IsSkipInterpolatedCameraNodeEnabled())
 			{
-				pos = stl::get<Vec3>(pPosTrack->GetValue(animContext.time));
+				pos = boost::get<Vec3>(pPosTrack->GetValue(animContext.time));
 
-				if (!Vec3::IsEquivalent(pos, GetPos(), 0.0001f))
+				if (!Vec3::IsEquivalent(pos, pEntity->GetPos(), 0.0001f))
 				{
 					entityUpdateFlags |= eUpdateEntity_Position;
 				}
 			}
 			else
 			{
-				if (!Vec3::IsEquivalent(pos, GetPos(), 0.0001f))
+				if (!Vec3::IsEquivalent(pos, pEntity->GetPos(), 0.0001f))
 				{
 					entityUpdateFlags |= eUpdateEntity_Position;
 					pos = m_vInterpPos;
@@ -803,16 +795,16 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 			if (!IsSkipInterpolatedCameraNodeEnabled())
 			{
-				rotate = stl::get<Quat>(pRotTrack->GetValue(animContext.time));
+				rotate = boost::get<Quat>(pRotTrack->GetValue(animContext.time));
 
-				if (!CompareRotation(rotate, GetRotate(), DEG2RAD(0.0001f)))
+				if (!CompareRotation(rotate, pEntity->GetRotation(), DEG2RAD(0.0001f)))
 				{
 					entityUpdateFlags |= eUpdateEntity_Rotation;
 				}
 			}
 			else
 			{
-				if (!CompareRotation(rotate, GetRotate(), DEG2RAD(0.0001f)))
+				if (!CompareRotation(rotate, pEntity->GetRotation(), DEG2RAD(0.0001f)))
 				{
 					entityUpdateFlags |= eUpdateEntity_Rotation;
 					rotate = m_interpRot;
@@ -823,7 +815,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 		case eAnimParamType_TransformNoise:
 			{
-				noiseParam = stl::get<Vec4>(pTrack->GetValue(animContext.time));
+				noiseParam = boost::get<Vec4>(pTrack->GetValue(animContext.time));
 				m_posNoise.m_amp = noiseParam.x;
 				m_posNoise.m_freq = noiseParam.y;
 				m_rotNoise.m_amp = noiseParam.z;
@@ -835,7 +827,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 		case eAnimParamType_Scale:
 			{
 				pScaleTrack = pTrack;
-				scale = stl::get<Vec3>(pScaleTrack->GetValue(animContext.time));
+				scale = boost::get<Vec3>(pScaleTrack->GetValue(animContext.time));
 
 				// Check whether the scale value is valid.
 				if (scale.x < 0.01 || scale.y < 0.01 || scale.z < 0.01)
@@ -846,7 +838,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 					scale = m_scale;
 				}
 
-				if (!Vec3::IsEquivalent(scale, GetScale(), 0.001f))
+				if (!Vec3::IsEquivalent(scale, pEntity->GetScale(), 0.001f))
 				{
 					bScaleModified = true;
 				}
@@ -895,7 +887,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 			if (!animContext.bResetting)
 			{
 				IAnimTrack* pVisibilityTrack = pTrack;
-				bool bVisible = stl::get<bool>(pVisibilityTrack->GetValue(animContext.time));
+				bool bVisible = boost::get<bool>(pVisibilityTrack->GetValue(animContext.time));
 
 				if (pEntity->IsHidden() == bVisible)
 				{
@@ -907,7 +899,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 						if (pPhysicalizeTrack)
 						{
-							const bool bUsePhysics = stl::get<bool>(pPhysicalizeTrack->GetValue(m_time));
+							const bool bUsePhysics = boost::get<bool>(pPhysicalizeTrack->GetValue(m_time));
 							EnableEntityPhysics(bUsePhysics);
 						}
 					}
@@ -928,7 +920,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 				if (!animContext.bResetting)
 				{
 					IAnimTrack* procEyeTrack = pTrack;
-					const bool bUseProcEyes = stl::get<bool>(procEyeTrack->GetValue(animContext.time));
+					const bool bUseProcEyes = boost::get<bool>(procEyeTrack->GetValue(animContext.time));
 					EnableProceduralFacialAnimation(bUseProcEyes);
 				}
 
@@ -936,59 +928,62 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 			}
 		case eAnimParamType_AudioTrigger:
 			{
-				++numAudioTriggerTracks;
+				++nNumAudioTracks;
 
-				if (numAudioTriggerTracks > m_audioTriggerTracks.size())
+				if (nNumAudioTracks > m_soundInfo.size())
 				{
-					m_audioTriggerTracks.resize(numAudioTriggerTracks);
+					m_soundInfo.resize(nNumAudioTracks);
 				}
+
+				bool const bMute = gEnv->IsEditor() && (pTrack->GetFlags() & IAnimTrack::eAnimTrackFlags_Muted);
 
 				if (!animContext.bResetting && !bMute && animContext.time > SAnimTime(0))
 				{
 					SAudioTriggerKey audioTriggerKey;
-					const int audioTriggerKeyNum = static_cast<CAudioTriggerTrack*>(pTrack)->GetActiveKey(animContext.time, &audioTriggerKey);
-					SAudioInfo& audioTriggerInfo = m_audioTriggerTracks[numAudioTriggerTracks - 1];
+					int const nAudioTriggerKey = static_cast<CAudioTriggerTrack*>(pTrack)->GetActiveKey(animContext.time, &audioTriggerKey);
+					SSoundInfo& soundInfo = m_soundInfo[nNumAudioTracks - 1];
 
-					if (audioTriggerKeyNum >= 0)
+					if (nAudioTriggerKey >= 0)
 					{
-						if (audioTriggerInfo.audioKeyStart < audioTriggerKeyNum)
-						{
-							ApplyAudioTriggerKey(audioTriggerKey.m_startTriggerId);
-						}
-
-						if (audioTriggerInfo.audioKeyStart > audioTriggerKeyNum)
-						{
-							audioTriggerInfo.audioKeyStop = audioTriggerKeyNum;
-						}
-
-						audioTriggerInfo.audioKeyStart = audioTriggerKeyNum;
-
 						SAnimTime const soundKeyTime = (animContext.time - audioTriggerKey.m_time);
+
+						if (soundInfo.nSoundKeyStart < nAudioTriggerKey)
+						{
+							ApplyAudioKey(audioTriggerKey.m_startTrigger);
+						}
+
+						if (soundInfo.nSoundKeyStart > nAudioTriggerKey)
+						{
+							soundInfo.nSoundKeyStop = nAudioTriggerKey;
+						}
+
+						soundInfo.nSoundKeyStart = nAudioTriggerKey;
+
 						if (audioTriggerKey.m_duration > SAnimTime(0) && soundKeyTime >= audioTriggerKey.m_duration)
 						{
-							if (audioTriggerInfo.audioKeyStop < audioTriggerKeyNum)
+							if (soundInfo.nSoundKeyStop < nAudioTriggerKey)
 							{
-								audioTriggerInfo.audioKeyStop = audioTriggerKeyNum;
+								soundInfo.nSoundKeyStop = nAudioTriggerKey;
 
-								if (audioTriggerKey.m_stopTriggerId != INVALID_AUDIO_CONTROL_ID)
+								if (audioTriggerKey.m_stopTrigger[0] != '\0')
 								{
-									ApplyAudioTriggerKey(audioTriggerKey.m_stopTriggerId);
+									ApplyAudioKey(audioTriggerKey.m_stopTrigger);
 								}
 								else
 								{
-									ApplyAudioTriggerKey(audioTriggerKey.m_startTriggerId, false);
+									ApplyAudioKey(audioTriggerKey.m_startTrigger, false);
 								}
 							}
 						}
 						else
 						{
-							audioTriggerInfo.audioKeyStop = -1;
+							soundInfo.nSoundKeyStop = -1;
 						}
 					}
 					else
 					{
-						audioTriggerInfo.audioKeyStart = -1;
-						audioTriggerInfo.audioKeyStop = -1;
+						soundInfo.nSoundKeyStart = -1;
+						soundInfo.nSoundKeyStop = -1;
 					}
 				}
 
@@ -997,105 +992,30 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 		case eAnimParamType_AudioFile:
 			{
-				++numAudioFileTracks;
-
-				if (numAudioFileTracks > m_audioFileTracks.size())
-				{
-					m_audioFileTracks.resize(numAudioFileTracks);
-				}
-
+				bool const bMute = gEnv->IsEditor() && (pTrack->GetFlags() & IAnimTrack::eAnimTrackFlags_Muted);
 				if (!animContext.bResetting && !bMute)
 				{
-					SAudioFileKey audioFileKey;
-					SAudioInfo& audioFileInfo = m_audioFileTracks[numAudioFileTracks - 1];
-					CAudioFileTrack* pAudioFileTrack = static_cast<CAudioFileTrack*>(pTrack);
-					const int audioFileKeyNum = pAudioFileTrack->GetActiveKey(animContext.time, &audioFileKey);
-					if (pEntity && audioFileKeyNum >= 0 && audioFileKey.m_duration > SAnimTime(0) && !(audioFileKey.m_bNoTriggerInScrubbing && animContext.bSingleFrame))
+					CAudioFileTrack* pAudioFileTrack = (CAudioFileTrack*)pTrack;
+					SAudioFileKey key;
+					int audioFileKey = pAudioFileTrack->GetActiveKey(animContext.time, &key);
+					if (audioFileKey != m_lastAudioFileKey || key.m_time == animContext.time)
 					{
-						const SAnimTime audioKeyTime = (animContext.time - audioFileKey.m_time);
-						if (animContext.time <= audioFileKey.m_time + audioFileKey.m_duration)
+						m_lastAudioFileKey = audioFileKey;
+						if (audioFileKey >= 0)
 						{
-							if (audioFileInfo.audioKeyStart < audioFileKeyNum)
+							const bool bNotTrigger = key.m_bNoTriggerInScrubbing && animContext.bSingleFrame && key.m_time != animContext.time;
+							if (!bNotTrigger && pEntity)
 							{
-								IEntityAudioComponent* pIEntityAudioComponent = pEntity->GetOrCreateComponent<IEntityAudioComponent>();
-								if (pIEntityAudioComponent)
+								IEntityAudioProxyPtr pIEntityAudioProxy = crycomponent_cast<IEntityAudioProxyPtr>(pEntity->CreateProxy(ENTITY_PROXY_AUDIO));
+								if (pIEntityAudioProxy)
 								{
-									const SAudioPlayFileInfo audioPlayFileInfo(audioFileKey.m_audioFile, audioFileKey.m_bIsLocalized);
-									pIEntityAudioComponent->PlayFile(audioPlayFileInfo);
-								}
-							}
-							audioFileInfo.audioKeyStart = audioFileKeyNum;
-						}
-						else if (audioKeyTime >= audioFileKey.m_duration)
-						{
-							audioFileInfo.audioKeyStart = -1;
-						}
-					}
-					else
-					{
-						audioFileInfo.audioKeyStart = -1;
-					}
-				}
+									char filePathBuffer[1024];
+									const char* szGameFolder = gEnv->pConsole->GetCVar("sys_game_folder")->GetString();
+									cry_strcpy(filePathBuffer, szGameFolder);
+									cry_strcat(filePathBuffer, "/");
+									cry_strcat(filePathBuffer, key.m_audioFile);
 
-				break;
-			}
-
-		case eAnimParamType_AudioParameter:
-			{
-				++numAudioParameterTracks;
-
-				if (numAudioParameterTracks > m_audioParameterTracks.size())
-				{
-					m_audioParameterTracks.resize(numAudioParameterTracks, 0.0f);
-				}
-
-				AudioControlId audioParameterId = static_cast<CAudioParameterTrack*>(pTrack)->m_audioParameterId;
-				if (audioParameterId != INVALID_AUDIO_CONTROL_ID)
-				{
-					const float newAudioParameterValue = stl::get<float>(pTrack->GetValue(animContext.time));
-					float& prevAudioParameterValue = m_audioParameterTracks[numAudioParameterTracks - 1];
-					if (fabs(prevAudioParameterValue - newAudioParameterValue) > FLT_EPSILON)
-					{
-						IEntityAudioComponent* pIEntityAudioComponent = pEntity->GetOrCreateComponent<IEntityAudioComponent>();
-						if (pIEntityAudioComponent)
-						{
-							pIEntityAudioComponent->SetRtpcValue(audioParameterId, newAudioParameterValue);
-							prevAudioParameterValue = newAudioParameterValue;
-						}
-					}
-				}
-
-				break;
-			}
-
-		case eAnimParamType_AudioSwitch:
-			{
-				++numAudioSwitchTracks;
-
-				if (numAudioSwitchTracks > m_audioSwitchTracks.size())
-				{
-					m_audioSwitchTracks.resize(numAudioSwitchTracks, -1);
-				}
-
-				if (!animContext.bResetting && !bMute)
-				{
-					SAudioSwitchKey audioSwitchKey;
-					CAudioSwitchTrack* pAudioSwitchTrack = static_cast<CAudioSwitchTrack*>(pTrack);
-					int& prevAudioSwitchKeyNum = m_audioSwitchTracks[numAudioSwitchTracks - 1];
-					const int newAudioSwitchKeyNum = pAudioSwitchTrack->GetActiveKey(animContext.time, &audioSwitchKey);
-					if (prevAudioSwitchKeyNum != newAudioSwitchKeyNum)
-					{
-						if (newAudioSwitchKeyNum >= 0)
-						{
-							AudioControlId audioSwitchId = audioSwitchKey.m_audioSwitchId;
-							AudioSwitchStateId audioSwitchStateId = audioSwitchKey.m_audioSwitchStateId;
-							if (audioSwitchId != INVALID_AUDIO_CONTROL_ID && audioSwitchStateId != INVALID_AUDIO_SWITCH_STATE_ID)
-							{
-								IEntityAudioComponent* pIEntityAudioComponent = pEntity->GetOrCreateComponent<IEntityAudioComponent>();
-								if (pIEntityAudioComponent)
-								{
-									pIEntityAudioComponent->SetSwitchState(audioSwitchId, audioSwitchStateId);
-									prevAudioSwitchKeyNum = newAudioSwitchKeyNum;
+									pIEntityAudioProxy->PlayFile(filePathBuffer);
 								}
 							}
 						}
@@ -1112,9 +1032,9 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 					CDynamicResponseSignalTrack* pDRSSignalTrack = (CDynamicResponseSignalTrack*)pTrack;
 					SDynamicResponseSignalKey key;
 					int drsSignalKey = pDRSSignalTrack->GetActiveKey(animContext.time, &key);
-					if (drsSignalKey != m_lastDrsSignalKey || key.m_time == animContext.time)
+					if (drsSignalKey != m_lastdrsSignalKey || key.m_time == animContext.time)
 					{
-						m_lastDrsSignalKey = drsSignalKey;
+						m_lastdrsSignalKey = drsSignalKey;
 						if (drsSignalKey >= 0)
 						{
 							const bool bNotTrigger = key.m_bNoTriggerInScrubbing && animContext.bSingleFrame && key.m_time != animContext.time;
@@ -1124,7 +1044,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 								sequenceName.Format("SendDrsSignal from Sequence '%s'", animContext.pSequence->GetName());
 								SET_DRS_USER_SCOPED(sequenceName);
 
-								const IEntityDynamicResponseComponent* pIEntityDrsProxy = crycomponent_cast<IEntityDynamicResponseComponent*>(pEntity->CreateProxy(ENTITY_PROXY_DYNAMICRESPONSE));
+								const IEntityDynamicResponseProxyPtr pIEntityDrsProxy = crycomponent_cast<IEntityDynamicResponseProxyPtr>(pEntity->CreateProxy(ENTITY_PROXY_DYNAMICRESPONSE));
 								DRS::IVariableCollectionSharedPtr pContextVariableCollection = nullptr;
 
 								if (key.m_contextVariableName[0] != 0)
@@ -1159,7 +1079,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 						m_iCurMannequinKey = key;
 
 						const uint32 valueName = CCrc32::ComputeLowercase(manKey.m_fragmentName);
-						IGameObject* pGameObject = gEnv->pGameFramework->GetGameObject(pEntity->GetId());
+						IGameObject* pGameObject = gEnv->pGame->GetIGameFramework()->GetGameObject(pEntity->GetId());
 
 						if (pGameObject)
 						{
@@ -1359,7 +1279,7 @@ void CAnimEntityNode::Animate(SAnimContext& animContext)
 
 	if (pPhysicalizeTrack)
 	{
-		const bool bUsePhysics = stl::get<bool>(pPhysicalizeTrack->GetValue(m_time));
+		const bool bUsePhysics = boost::get<bool>(pPhysicalizeTrack->GetValue(m_time));
 		EnableEntityPhysics(bUsePhysics);
 	}
 
@@ -1448,12 +1368,6 @@ void CAnimEntityNode::OnReset()
 {
 	m_EntityId = 0;
 	m_lastEntityKey = -1;
-	m_lastDrsSignalKey = -1;
-
-	m_audioFileTracks.clear();
-	m_audioSwitchTracks.clear();
-	m_audioTriggerTracks.clear();
-	m_audioParameterTracks.clear();
 
 	m_baseAnimState.m_lastAnimationKeys[0][0] = -1;
 	m_baseAnimState.m_lastAnimationKeys[0][1] = -1;
@@ -1669,7 +1583,12 @@ void CAnimEntityNode::OnStart()
 
 		if (IEntity* pEntity = GetEntity())
 		{
-			m_bInitialPhysicsStatus = pEntity->IsPhysicsEnabled();
+			IEntityPhysicalProxy* pPhysicalProxy = (IEntityPhysicalProxy*)pEntity->GetProxy(ENTITY_PROXY_PHYSICS);
+
+			if (pPhysicalProxy)
+			{
+				m_bInitialPhysicsStatus = pPhysicalProxy->IsPhysicsEnabled();
+			}
 		}
 
 		EnableEntityPhysics(false);
@@ -1702,7 +1621,7 @@ void CAnimEntityNode::UpdateEntityPosRotVel(const Vec3& targetPos, const Quat& t
 
 	if (pPhysicsDrivenTrack)
 	{
-		bPhysicsDriven = stl::get<bool>(pPhysicsDrivenTrack->GetValue(m_time));
+		bPhysicsDriven = boost::get<bool>(pPhysicsDrivenTrack->GetValue(m_time));
 	}
 
 	IPhysicalEntity* pPhysEnt = (initialState || pEntity->GetParent()) ? NULL : pEntity->GetPhysics();
@@ -1803,7 +1722,7 @@ void CAnimEntityNode::ApplyEventKey(CEventTrack* track, int keyIndex, SEventKey&
 	if (key.m_event.size() > 0) // if there's an event
 	{
 		// Fire event on Entity.
-		IEntityScriptComponent* pScriptProxy = (IEntityScriptComponent*)pEntity->GetProxy(ENTITY_PROXY_SCRIPT);
+		IEntityScriptProxy* pScriptProxy = (IEntityScriptProxy*)pEntity->GetProxy(ENTITY_PROXY_SCRIPT);
 
 		if (pScriptProxy)
 		{
@@ -1864,23 +1783,27 @@ void CAnimEntityNode::ApplyEventKey(CEventTrack* track, int keyIndex, SEventKey&
 }
 
 //////////////////////////////////////////////////////////////////////////
-void CAnimEntityNode::ApplyAudioTriggerKey(AudioControlId audioTriggerId, bool const bPlay /* = true */)
+void CAnimEntityNode::ApplyAudioKey(char const* const sTriggerName, bool const bPlay /* = true */)
 {
-	if (audioTriggerId != INVALID_AUDIO_CONTROL_ID)
-	{
-		IEntity* const pEntity = GetEntity();
+	IEntity* const pEntity = GetEntity();
 
-		// Get or create sound proxy if necessary.
-		IEntityAudioComponent* const pIEntityAudioComponent = pEntity->GetOrCreateComponent<IEntityAudioComponent>();
-		if (pIEntityAudioComponent)
+	// Get or create sound proxy if necessary.
+	IEntityAudioProxyPtr const pIEntityAudioProxy = crycomponent_cast<IEntityAudioProxyPtr>(pEntity->CreateProxy(ENTITY_PROXY_AUDIO));
+
+	if (pIEntityAudioProxy)
+	{
+		AudioControlId nAudioControlID = INVALID_AUDIO_CONTROL_ID;
+		gEnv->pAudioSystem->GetAudioTriggerId(sTriggerName, nAudioControlID);
+
+		if (nAudioControlID != INVALID_AUDIO_CONTROL_ID)
 		{
 			if (bPlay)
 			{
-				pIEntityAudioComponent->ExecuteTrigger(audioTriggerId);
+				pIEntityAudioProxy->ExecuteTrigger(nAudioControlID);
 			}
 			else
 			{
-				pIEntityAudioComponent->StopTrigger(audioTriggerId);
+				pIEntityAudioProxy->StopTrigger(nAudioControlID);
 			}
 		}
 	}
@@ -2367,10 +2290,10 @@ void CAnimEntityNode::AnimateLookAt(CLookAtTrack* pTrack, SAnimContext& animCont
 				m_lookAtLocalPlayer = false;
 				pTargetEntity = gEnv->pEntitySystem->FindEntityByName(key.m_selection);
 			}
-			else if (gEnv->pGameFramework)
+			else if (gEnv->pGame)
 			{
 				m_lookAtLocalPlayer = true;
-				IActor* pLocalActor = gEnv->pGameFramework->GetClientActor();
+				IActor* pLocalActor = gEnv->pGame->GetIGameFramework()->GetClientActor();
 
 				if (pLocalActor)
 				{
@@ -2526,7 +2449,7 @@ bool CAnimEntityNode::AnimateScriptTableProperty(IAnimTrack* pTrack, SAnimContex
 		switch (pTrack->GetValueType())
 		{
 		case eAnimValue_Float:
-			fValue = stl::get<float>(value);
+			fValue = boost::get<float>(value);
 			param.scriptTable->GetValue(param.variableName, currfValue);
 
 			// this check actually fails much more often than it should. There is some kind of lack of precision in the trackview interpolation calculations, and often a value that should
@@ -2543,7 +2466,7 @@ bool CAnimEntityNode::AnimateScriptTableProperty(IAnimTrack* pTrack, SAnimContex
 		case eAnimValue_Vector:
 		// fall through
 		case eAnimValue_RGB:
-			vecValue = stl::get<Vec3>(value);
+			vecValue = boost::get<Vec3>(value);
 
 			if (pTrack->GetValueType() == eAnimValue_RGB)
 			{
@@ -2580,7 +2503,7 @@ bool CAnimEntityNode::AnimateScriptTableProperty(IAnimTrack* pTrack, SAnimContex
 			break;
 
 		case eAnimValue_Bool:
-			boolValue = stl::get<bool>(value);
+			boolValue = boost::get<bool>(value);
 
 			if (param.scriptTable->GetValueType(param.variableName) == svtNumber)
 			{
@@ -2629,26 +2552,16 @@ bool CAnimEntityNode::AnimateScriptTableProperty(IAnimTrack* pTrack, SAnimContex
 void CAnimEntityNode::Serialize(XmlNodeRef& xmlNode, bool bLoading, bool bLoadEmptyTracks)
 {
 	CAnimNode::Serialize(xmlNode, bLoading, bLoadEmptyTracks);
-	IEntity* pEntity = gEnv->pEntitySystem->FindEntityByName(m_name);
-
-	if (pEntity)
-	{
-		m_entityGuid = pEntity->GetGuid();
-	}
 
 	if (bLoading)
 	{
-		if (!pEntity)
-		{
-			xmlNode->getAttr("EntityGUID", m_entityGuid);
-		}
+		xmlNode->getAttr("EntityGUID", m_entityGuid);
 
 		xmlNode->getAttr("EntityGUIDTarget", m_entityGuidTarget);
 		xmlNode->getAttr("EntityGUIDSource", m_entityGuidSource);
 	}
 	else
 	{
-		// Save the latest object GUID obtained from the Entity System
 		xmlNode->setAttr("EntityGUID", m_entityGuid);
 
 		if (m_entityGuidTarget)
@@ -3133,10 +3046,8 @@ void CAnimationCacher::AddToCache(uint32 animPathCRC)
 		}
 	}
 
-	if (gEnv->pCharacterManager->CAF_AddRef(animPathCRC))
-	{
-		m_cachedAnims.push_back(animPathCRC);
-	}
+	gEnv->pCharacterManager->CAF_AddRef(animPathCRC);
+	m_cachedAnims.push_back(animPathCRC);
 }
 
 void CAnimationCacher::RemoveFromCache(uint32 animPathCRC)

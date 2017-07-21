@@ -5,17 +5,19 @@
 
 #if INCLUDE_DEMO_RECORDING
 
-#include "DemoRecordListener.h"
-#include "NetContext.h"
-#include <CrySystem/ITimer.h>
-#include "Streams/CompressingStream.h"
-#include "DemoDefinitions.h"
-#include "Context/ServerContextView.h"
-#include <CryGame/IGameFramework.h>
+	#include "DemoRecordListener.h"
+	#include "NetContext.h"
+	#include <CrySystem/ITimer.h>
+	#include "Streams/CompressingStream.h"
+	#include "DemoDefinitions.h"
+	#include "Context/ServerContextView.h"
+	#include <CryGame/IGame.h>
+	#include <CryGame/IGameFramework.h>
+	#include "IGameObject.h"
 
-#ifdef _MSC_VER
-#pragma warning(disable:4355)
-#endif
+	#ifdef _MSC_VER
+		#pragma warning(disable:4355)
+	#endif
 
 static const uint32 EventsNormal =
   eNOE_BindObject |
@@ -50,7 +52,7 @@ CDemoRecordListener::CDemoRecorderChannel::CDemoRecorderChannel(CDemoRecordListe
 	string connectionString = pParent->m_pContext->GetGameContext()->GetConnectionString(NULL, true);
 
 	// is there a more direct way to get the server nub???
-	m_pGameChannel = static_cast<CNetNub*>(gEnv->pGameFramework->GetServerNetNub())->GetGameNub()->CreateChannel(this, connectionString.c_str()).pChannel;
+	m_pGameChannel = static_cast<CNetNub*>(gEnv->pGame->GetIGameFramework()->GetServerNetNub())->GetGameNub()->CreateChannel(this, connectionString.c_str()).pChannel;
 }
 
 CDemoRecordListener::CDemoRecorderChannel::~CDemoRecorderChannel()
@@ -71,7 +73,7 @@ bool CDemoRecordListener::CDemoRecorderChannel::AddSendable(INetSendablePtr pSen
 
 void CDemoRecordListener::CDemoRecorderChannel::DispatchRMI(IRMIMessageBodyPtr pBody)
 {
-	class CRMIMessage:public INetBaseSendable
+	class CRMIMessage : public INetBaseSendable
 	{
 	public:
 		CRMIMessage(IRMIMessageBodyPtr pBody) : m_pBody(pBody) {}
@@ -104,7 +106,7 @@ void CDemoRecordListener::CDemoRecorderChannel::DispatchRMI(IRMIMessageBodyPtr p
 		IRMIMessageBodyPtr m_pBody;
 	};
 
-	class CRMIMessageScript:public INetBaseSendable
+	class CRMIMessageScript : public INetBaseSendable
 	{
 	public:
 		CRMIMessageScript(IRMIMessageBodyPtr pBody, const SNetMessageDef* pDef) : m_pBody(pBody), m_pDef(pDef) {}
@@ -112,7 +114,7 @@ void CDemoRecordListener::CDemoRecorderChannel::DispatchRMI(IRMIMessageBodyPtr p
 		EMessageSendResult Send(INetSender* pSender)
 		{
 			EntityId objId = m_pBody->objId;
-			uint8 funcId   = m_pBody->funcId;
+			uint8 funcId = m_pBody->funcId;
 
 			string desc = m_pDef->description;
 			pSender->ser.Value("ScriptRMI", desc);
@@ -134,7 +136,7 @@ void CDemoRecordListener::CDemoRecorderChannel::DispatchRMI(IRMIMessageBodyPtr p
 		}
 
 	private:
-		IRMIMessageBodyPtr m_pBody;
+		IRMIMessageBodyPtr    m_pBody;
 		const SNetMessageDef* m_pDef;
 	};
 
@@ -238,10 +240,10 @@ void CDemoRecordListener::Die()
 
 void CDemoRecordListener::SendMessage(INetBaseSendable* pSendable, bool immediate)
 {
-	class CDemoMessageSender:public INetSender
+	class CDemoMessageSender : public INetSender
 	{
 	public:
-		CDemoMessageSender(TSerialize& ser, CSimpleOutputStream* pOut) : INetSender(ser, 0, 0, 0, true), m_pOut(pOut) {}
+		CDemoMessageSender(TSerialize& ser, CSimpleOutputStream* pOut) : INetSender(ser, 0, 0, true), m_pOut(pOut) {}
 
 		void BeginMessage(const SNetMessageDef* pDef)
 		{
@@ -337,7 +339,7 @@ void CDemoRecordListener::OnObjectEvent(CNetContextState* pState, SNetObjectEven
 		DoChangeContext(pEvent->pNewState);
 		break;
 	case eNOE_InGame:
-		m_bInGame   = true;
+		m_bInGame = true;
 		m_startTime = gEnv->pTimer->GetFrameStartTime();
 		break;
 	}
@@ -417,8 +419,14 @@ void CDemoRecordListener::DoUpdateObject(const SContextObjectRef& obj, NetworkAs
 	//if (obj.main->userID == LOCAL_PLAYER_ENTITY_ID)
 	//	DEBUG_BREAK;
 
+	//IGameObject* pGameObject = gEnv->pGame->GetIGameFramework()->GetGameObject(obj.main->userID);
+	//if (!pGameObject)
+	//	return;
+
+	//uint8 profile = pGameObject->GetPhysicalizationProfile();
+
 	CSimpleMemoryOutputStream output;
-	CDemoRecordSerializeImpl  serImpl(&output, m_boundObjects);
+	CDemoRecordSerializeImpl serImpl(&output, m_boundObjects);
 	CSimpleSerialize<CDemoRecordSerializeImpl> serSimple(serImpl);
 	TSerialize ser(&serSimple);
 
@@ -431,7 +439,7 @@ void CDemoRecordListener::DoUpdateObject(const SContextObjectRef& obj, NetworkAs
 		{
 			uint8 profile = obj.main->vAspectProfiles[i];
 			output.Put("BeginAspect", i);
-			output.Put(".profile", profile);  // physics only
+			output.Put(".profile", profile); // physics only
 			pGameContext->SynchObject(obj.main->userID, aspect, profile, ser, false);
 			output.Put(NDemo::EndOfSerializationBlock, "");
 		}
@@ -552,7 +560,7 @@ void CDemoRecordListener::DoSetAspectProfile(SNetObjectID id, NetworkAspectType 
 	CSimpleOutputStream* pOut = immediate ? m_output.get() : &output;
 
 	pOut->Put("SetAspectProfile", obj.main->userID);
-	pOut->Put(".aspects", aspects);  // which is the bit index
+	pOut->Put(".aspects", aspects); // which is the bit index
 	pOut->Put(".profile", profile);
 
 	if (!immediate)

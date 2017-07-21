@@ -107,8 +107,9 @@ void CD3D9Renderer::RT_Draw2dImageInternal(S2DImage* images, uint32 numImages, b
 	m_RP.m_TI[m_RP.m_nProcessThreadID].m_matView->LoadIdentity();
 
 	// Create dynamic geometry
-	// NOTE: Get aligned stack-space (pointer and size aligned to manager's alignment requirement)
-	CryStackAllocWithSizeVector(SVF_P3F_C4B_T2F, numImages * 4, vQuad, CDeviceBufferManager::AlignBufferSizeForStreaming);
+	TempDynVB<SVF_P3F_C4B_T2F> vb;
+	vb.Allocate(numImages * 4);
+	SVF_P3F_C4B_T2F* vQuad = vb.Lock();
 
 	for (uint32 i = 0; i < numImages; ++i)
 	{
@@ -196,7 +197,9 @@ void CD3D9Renderer::RT_Draw2dImageInternal(S2DImage* images, uint32 numImages, b
 		}
 	}
 
-	TempDynVB<SVF_P3F_C4B_T2F>::CreateFillAndBind(vQuad, numImages * 4, 0);
+	vb.Unlock();
+	vb.Bind(0);
+	vb.Release();
 
 	CTexture* prevTex = NULL;
 	EF_SetColorOp(eCO_REPLACE, eCO_REPLACE, (eCA_Diffuse | (eCA_Diffuse << 3)), (eCA_Diffuse | (eCA_Diffuse << 3)));
@@ -248,6 +251,31 @@ void CD3D9Renderer::RT_Draw2dImageInternal(S2DImage* images, uint32 numImages, b
 	m_RP.m_TI[m_RP.m_nProcessThreadID].m_matProj->Pop();
 }
 
+void CD3D9Renderer::RT_DrawStringU(IFFont_RenderProxy* pFont, float x, float y, float z, const char* pStr, const bool asciiMultiLine, const STextDrawContext& ctx) const
+{
+	SetProfileMarker("DRAWSTRINGU", CRenderer::ESPM_PUSH);
+
+	if (GetS3DRend().IsStereoEnabled() && !GetS3DRend().DisplayStereoDone())
+	{
+		GetS3DRend().BeginRenderingTo(LEFT_EYE);
+		pFont->RenderCallback(x, y, z, pStr, asciiMultiLine, ctx);
+		GetS3DRend().EndRenderingTo(LEFT_EYE);
+
+		if (GetS3DRend().RequiresSequentialSubmission())
+		{
+			GetS3DRend().BeginRenderingTo(RIGHT_EYE);
+			pFont->RenderCallback(x, y, z, pStr, asciiMultiLine, ctx);
+			GetS3DRend().EndRenderingTo(RIGHT_EYE);
+		}
+	}
+	else
+	{
+		pFont->RenderCallback(x, y, z, pStr, asciiMultiLine, ctx);
+	}
+
+	SetProfileMarker("DRAWSTRINGU", CRenderer::ESPM_POP);
+}
+
 void CD3D9Renderer::RT_DrawLines(Vec3 v[], int nump, ColorF& col, int flags, float fGround)
 {
 	if (m_bDeviceLost)
@@ -268,8 +296,9 @@ void CD3D9Renderer::RT_DrawLines(Vec3 v[], int nump, ColorF& col, int flags, flo
 
 	if (fGround >= 0)
 	{
-		// NOTE: Get aligned stack-space (pointer and size aligned to manager's alignment requirement)
-		CryStackAllocWithSizeVector(SVF_P3F_C4B_T2F, nump * 2, vQuad, CDeviceBufferManager::AlignBufferSizeForStreaming);
+		TempDynVB<SVF_P3F_C4B_T2F> vb;
+		vb.Allocate(nump * 2);
+		SVF_P3F_C4B_T2F* vQuad = vb.Lock();
 
 		for (i = 0; i < nump; i++)
 		{
@@ -283,7 +312,9 @@ void CD3D9Renderer::RT_DrawLines(Vec3 v[], int nump, ColorF& col, int flags, flo
 			vQuad[i * 2 + 1].st = Vec2(0.0f, 0.0f);
 		}
 
-		TempDynVB<SVF_P3F_C4B_T2F>::CreateFillAndBind(vQuad, nump * 2, 0);
+		vb.Unlock();
+		vb.Bind(0);
+		vb.Release();
 
 		FX_SetFPMode();
 		if (!FAILED(FX_SetVertexDeclaration(0, eVF_P3F_C4B_T2F)))
@@ -291,8 +322,9 @@ void CD3D9Renderer::RT_DrawLines(Vec3 v[], int nump, ColorF& col, int flags, flo
 	}
 	else
 	{
-		// NOTE: Get aligned stack-space (pointer and size aligned to manager's alignment requirement)
-		CryStackAllocWithSizeVector(SVF_P3F_C4B_T2F, nump, vQuad, CDeviceBufferManager::AlignBufferSizeForStreaming);
+		TempDynVB<SVF_P3F_C4B_T2F> vb;
+		vb.Allocate(nump);
+		SVF_P3F_C4B_T2F* vQuad = vb.Lock();
 
 		for (i = 0; i < nump; i++)
 		{
@@ -301,7 +333,9 @@ void CD3D9Renderer::RT_DrawLines(Vec3 v[], int nump, ColorF& col, int flags, flo
 			vQuad[i].st = Vec2(0, 0);
 		}
 
-		TempDynVB<SVF_P3F_C4B_T2F>::CreateFillAndBind(vQuad, nump, 0);
+		vb.Unlock();
+		vb.Bind(0);
+		vb.Release();
 
 		FX_SetFPMode();
 		if (!FAILED(FX_SetVertexDeclaration(0, eVF_P3F_C4B_T2F)))
@@ -394,7 +428,10 @@ void CD3D9Renderer::FlashRenderInternal(IFlashPlayer_RenderProxy* pPlayer, bool 
 
 		if (GetS3DRend().IsStereoEnabled() && bStereo)
 		{
-			if (GetS3DRend().IsQuadLayerEnabled())
+			IHmdManager* pHmdManager = gEnv->pSystem->GetHmdManager();
+			const EHmdClass hmdClass = pHmdManager && pHmdManager->GetHmdDevice() ? pHmdManager->GetHmdDevice()->GetClass() : eHmdClass_Null;
+			const bool bRenderFlashToVrLayer = CRenderer::CV_r_StereoMode == STEREO_MODE_DUAL_RENDERING && (hmdClass == eHmdClass_Oculus || hmdClass == eHmdClass_OpenVR);
+			if (bRenderFlashToVrLayer)
 			{
 				GetS3DRend().BeginRenderingToVrQuadLayer(RenderLayer::eQuadLayers_0);
 				pPlayer->RenderCallback(IFlashPlayer_RenderProxy::EFT_Mono);
@@ -435,24 +472,15 @@ void CD3D9Renderer::FlashRenderPlaybackLocklessInternal(IFlashPlayer_RenderProxy
 
 		if (GetS3DRend().IsStereoEnabled() && bStereo)
 		{
-			if (GetS3DRend().IsQuadLayerEnabled())
-			{
-				GetS3DRend().BeginRenderingToVrQuadLayer(RenderLayer::eQuadLayers_0);
-				pPlayer->RenderPlaybackLocklessCallback(cbIdx, IFlashPlayer_RenderProxy::EFT_Mono, bFinalPlayback);
-				GetS3DRend().EndRenderingToVrQuadLayer(RenderLayer::eQuadLayers_0);
-			}
-			else
-			{
-				GetS3DRend().BeginRenderingTo(LEFT_EYE);
-				pPlayer->RenderPlaybackLocklessCallback(cbIdx, IFlashPlayer_RenderProxy::EFT_StereoLeft, false, false);
-				GetS3DRend().EndRenderingTo(LEFT_EYE);
+			GetS3DRend().BeginRenderingTo(LEFT_EYE);
+			pPlayer->RenderPlaybackLocklessCallback(cbIdx, IFlashPlayer_RenderProxy::EFT_StereoLeft, false, false);
+			GetS3DRend().EndRenderingTo(LEFT_EYE);
 
-				if (GetS3DRend().RequiresSequentialSubmission())
-				{
-					GetS3DRend().BeginRenderingTo(RIGHT_EYE);
-					pPlayer->RenderPlaybackLocklessCallback(cbIdx, IFlashPlayer_RenderProxy::EFT_StereoRight, bFinalPlayback, true);
-					GetS3DRend().EndRenderingTo(RIGHT_EYE);
-				}
+			if (GetS3DRend().RequiresSequentialSubmission())
+			{
+				GetS3DRend().BeginRenderingTo(RIGHT_EYE);
+				pPlayer->RenderPlaybackLocklessCallback(cbIdx, IFlashPlayer_RenderProxy::EFT_StereoRight, bFinalPlayback, true);
+				GetS3DRend().EndRenderingTo(RIGHT_EYE);
 			}
 		}
 		else
@@ -535,11 +563,6 @@ void CD3D9Renderer::RT_ReleaseResource(SResourceAsync* pRes)
 	delete pRes;
 }
 
-void CD3D9Renderer::RT_ReleaseOptics(IOpticsElementBase* pOpticsElement)
-{
-	SAFE_RELEASE(pOpticsElement);
-}
-
 void CD3D9Renderer::RT_UnbindTMUs()
 {
 	D3DShaderResource* pTex[MAX_TMU] = { NULL };
@@ -586,8 +609,6 @@ void CD3D9Renderer::RT_UnbindResources()
 
 void CD3D9Renderer::RT_ReleaseRenderResources(uint32 nFlags)
 {
-	ForceFlushRTCommands();
-
 	if (nFlags & (FRR_PERMANENT_RENDER_OBJECTS | FRR_OBJECTS))
 	{
 		// Delete all items that have not been allocated from the object pool
@@ -599,10 +620,15 @@ void CD3D9Renderer::RT_ReleaseRenderResources(uint32 nFlags)
 			return;
 	}
 
+	if (m_gpuParticleManager)
+		m_gpuParticleManager->RT_CleanupResources();
+
 	RT_GraphicsPipelineShutdown();
 
+	m_cEF.mfReleasePreactivatedShaderData();
 	m_cEF.m_Bin.InvalidateCache();
 	//m_cEF.m_Bin.m_BinPaths.clear();
+	ForceFlushRTCommands();
 
 	for (uint i = 0; i < CLightStyle::s_LStyles.Num(); i++)
 	{
@@ -671,9 +697,9 @@ void CD3D9Renderer::RT_CreateRenderResources()
 void CD3D9Renderer::RT_PrecacheDefaultShaders()
 {
 	SShaderCombination cmb;
-	m_cEF.s_ShaderStereo->mfPrecache(cmb, true, NULL);
+	m_cEF.s_ShaderStereo->mfPrecache(cmb, true, true, NULL);
 
-#if RENDERER_SUPPORT_SCALEFORM
+#if defined(INCLUDE_SCALEFORM_SDK) || defined(CRY_FEATURE_SCALEFORM_HELPER)
 	SF_PrecacheShaders();
 #endif
 }
@@ -758,14 +784,11 @@ void CD3D9Renderer::StopLoadtimeFlashPlayback()
 		            0.0f, 0.0f, 1.0f, 1.0f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f);
 
 #if !defined(STRIP_RENDER_THREAD)
-		if(m_pRT->m_CommandsLoading.size() > 0)
-		{
-			// Blit the accumulated commands from the renderloading thread into the current fill command queue
-			// : Currently hacked into the RC_UpdateMaterialConstants command, but will be generalized soon
-			void* buf = m_pRT->m_Commands[m_pRT->m_nCurThreadFill].Grow(m_pRT->m_CommandsLoading.size());
-			memcpy(buf, &m_pRT->m_CommandsLoading[0], m_pRT->m_CommandsLoading.size());
-			m_pRT->m_CommandsLoading.Free();
-		}
+		// Blit the accumulated commands from the renderloading thread into the current fill command queue
+		// : Currently hacked into the RC_UpdateMaterialConstants command, but will be generalized soon
+		void* buf = m_pRT->m_Commands[m_pRT->m_nCurThreadFill].Grow(m_pRT->m_CommandsLoading.size());
+		memcpy(buf, &m_pRT->m_CommandsLoading[0], m_pRT->m_CommandsLoading.size());
+		m_pRT->m_CommandsLoading.Free();
 #endif // !defined(STRIP_RENDER_THREAD)
 	}
 }
@@ -783,7 +806,7 @@ void CRenderer::RT_SubmitWind(const SWindGrid* pWind)
 	int nThreadID = m_pRT->m_nCurThreadProcess;
 	pDevTex->UploadFromStagingResource(0, [=](void* pData, uint32 rowPitch, uint32 slicePitch)
 	{
-		cryMemcpy(pData, pWind->m_pData, CTexture::TextureDataSize(pWind->m_nWidth, pWind->m_nHeight, 1, 1, 1, eTF_R16G16F));
+		cryMemcpy(pData, pWind->m_pData, CTexture::TextureDataSize(pWind->m_nWidth, pWind->m_nHeight, 1, 1, 1, eTF_R16G16));
 		return true;
 	});
 }

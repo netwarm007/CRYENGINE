@@ -5,6 +5,7 @@
 #include <Cry3DEngine/I3DEngine.h>
 #include <CryCore/CryCrc32.h>
 #include "../Common/Shaders/RemoteCompiler.h"
+#include "D3DLightPropagationVolume.h"
 #include "../Common/PostProcess/PostEffects.h"
 #include "D3DPostProcess.h"
 
@@ -15,9 +16,7 @@
 #if defined(FEATURE_SVO_GI)
 	#include "D3D_SVO.h"
 #endif
-#include "GraphicsPipeline/VolumetricClouds.h"
-#include "GraphicsPipeline/VolumetricFog.h"
-#include "GraphicsPipeline/WaterRipples.h"
+#include "D3DVolumetricClouds.h"
 
 #include "Common/RenderView.h"
 
@@ -61,6 +60,8 @@ bool CHWShader_D3D::s_bFirstPS = true;
 
 int CHWShader_D3D::s_nActivationFailMask = 0;
 
+std::vector<SCGParam> CHWShader_D3D::s_PF_Params[eHWSC_Num];
+std::vector<SCGParam> CHWShader_D3D::s_SG_Params[eHWSC_Num];
 std::vector<SCGParam> CHWShader_D3D::s_CM_Params[eHWSC_Num];
 
 std::vector<SCGTexture> CHWShader_D3D::s_PF_Textures;        // Per-frame textures
@@ -88,9 +89,6 @@ SD3DShader* CHWShader::s_pCurGS;
 SD3DShader* CHWShader::s_pCurDS;
 SD3DShader* CHWShader::s_pCurHS;
 SD3DShader* CHWShader::s_pCurCS;
-
-CHWShader* CHWShader::s_pCurHWVS;
-char *CHWShader::s_GS_MultiRes_NV;
 
 FXShaderCache CHWShader::m_ShaderCache;
 FXShaderDevCache CHWShader::m_ShaderDevCache;
@@ -237,7 +235,7 @@ inline void multMatrixf_Transp2(float* product, const float* m1, const float* m2
 #undef P
 }
 
-inline void mathMatrixMultiply_Transp2(float* pOut, const float* pM1, const float* pM2)
+inline void mathMatrixMultiply_Transp2(float* pOut, const float* pM1, const float* pM2, int OptFlags)
 {
 #if CRY_PLATFORM_SSE2
 	multMatrixf_Transp2_SSE(pOut, pM1, pM2);
@@ -266,6 +264,8 @@ int SD3DShader::Release(EHWShaderClass eSHClass, int nSize)
 		return ((ID3D11PixelShader*)pHandle)->Release();
 	else if (eSHClass == eHWSC_Vertex)
 		return ((ID3D11VertexShader*)pHandle)->Release();
+	else if (eSHClass == eHWSC_Geometry)
+		return ((ID3D11GeometryShader*)pHandle)->Release();
 	else if (eSHClass == eHWSC_Geometry)
 		return ((ID3D11GeometryShader*)pHandle)->Release();
 	else if (eSHClass == eHWSC_Hull)
@@ -400,6 +400,8 @@ void CHWShader_D3D::InitialiseContainers()
 	uint32 i;
 	for (i = 0; i < eHWSC_Num; i++)
 	{
+		s_PF_Params[i].reserve(8);
+		s_SG_Params[i].reserve(8);
 		s_CM_Params[i].reserve(8);
 	}
 	s_PF_Textures.reserve(MAX_PF_TEXTURES);
@@ -470,6 +472,8 @@ void CHWShader_D3D::ShutDown()
 	for (int i = 0; i < eHWSC_Num; i++)
 	{
 		stl::free_container(s_CM_Params[i]);
+		stl::free_container(s_PF_Params[i]);
+		stl::free_container(s_SG_Params[i]);
 	}
 	stl::free_container(s_PF_Textures);
 	stl::free_container(s_PF_Samplers);
@@ -573,8 +577,7 @@ CHWShader* CHWShader::mfForName(const char* name, const char* nameSource, uint32
 			{
 				FXShaderToken* pMap = pTable;
 				TArray<uint32>* pData = &SHData;
-				if (pData->size())
-				  pSH->mfGetCacheTokenMap(pMap, pData, pSH->m_nMaskGenShader);
+				pSH->mfGetCacheTokenMap(pMap, pData, pSH->m_nMaskGenShader);
 			}
 			return pSH;
 		}
@@ -594,27 +597,6 @@ CHWShader* CHWShader::mfForName(const char* name, const char* nameSource, uint32
 	pSH->m_nMaskGenShader = nMaskGen;
 	pSH->m_nMaskGenFX = nMaskGenFX;
 	pSH->m_CRC32 = CRC32;
-	// Check for auto MultiRes-Geom shader
-	if (eClass == eHWSC_Geometry && szEntryFunc[0] == '$')
-	{
-		if (!CVrProjectionManager::IsMultiResEnabledStatic())
-		{
-			pSH->Release();
-			return NULL;
-		}
-		pSH->m_Flags |= HWSG_GS_MULTIRES;
-		SShaderBin *pBinGS = gRenDev->m_cEF.m_Bin.GetBinShader("$nv_vr", false, pFX->m_CRC32);
-		if (pBinGS)
-		{
-			CParserBin Parser(pBinGS, pFX);
-			CShader* efGen = pFX->m_pGenShader;
-			if (efGen && efGen->m_ShaderGenParams)
-				gRenDev->m_cEF.m_Bin.AddGenMacros(efGen->m_ShaderGenParams, Parser, pFX->m_nMaskGenFX);
-			Parser.Preprocess(0, pBinGS->m_Tokens, &pBinGS->m_TokenTable);
-			pSH->m_TokenTable = Parser.m_TokenTable;
-			pSH->m_TokenData.Copy(&Parser.m_Tokens[0], Parser.m_Tokens.size());
-		}
-	}
 
 	pSH->mfConstructFX(pTable, &SHData);
 
@@ -811,12 +793,11 @@ void CHWShader_D3D::mfConstructFX(FXShaderToken* Table, TArray<uint32>* pSHData)
 	{
 		FXShaderToken* pMap = Table;
 		TArray<uint32>* pData = pSHData;
-		if (pData->size())
-		  mfGetCacheTokenMap(pMap, pData, m_nMaskGenShader);   // Store tokens
+		mfGetCacheTokenMap(pMap, pData, m_nMaskGenShader);   // Store tokens
 	}
 }
 
-bool CHWShader_D3D::mfPrecache(SShaderCombination& cmb, bool bForce, bool bFallback, CShader* pSH, CShaderResources* pRes)
+bool CHWShader_D3D::mfPrecache(SShaderCombination& cmb, bool bForce, bool bFallback, bool bCompressedOnly, CShader* pSH, CShaderResources* pRes)
 {
 	assert(gRenDev->m_pRT->IsRenderThread());
 
@@ -857,7 +838,7 @@ bool CHWShader_D3D::mfPrecache(SShaderCombination& cmb, bool bForce, bool bFallb
 		SHWSInstance* pInst = mfGetInstance(pSH, Ident, HWSF_PRECACHE_INST);
 		pInst->m_bFallback = bFallback;
 		pInst->m_fLastAccess = gRenDev->m_RP.m_TI[gRenDev->m_RP.m_nProcessThreadID].m_RealTime;
-		mfActivate(pSH, nFlags, NULL, NULL);
+		mfActivate(pSH, nFlags, NULL, NULL, bCompressedOnly);
 	}
 
 	return bRes;
@@ -1042,7 +1023,7 @@ void CGParamManager::Shutdown()
 
 SCGParamPool* CGParamManager::NewPool(int nEntries)
 {
-  return s_Pools.emplace_back(nEntries);
+	return new(s_Pools.grow_raw())SCGParamPool(nEntries);
 }
 
 //===========================================================================================================
@@ -1072,7 +1053,7 @@ NO_INLINE void sZeroLine(UFloat4* sData)
 	sData[0].f[3] = 0.0f;
 }
 
-NO_INLINE CRenderElement* sGetContainerRE0(CRenderElement* pRE)
+NO_INLINE CRendElementBase* sGetContainerRE0(CRendElementBase* pRE)
 {
 	assert(pRE);      // someone assigned wrong shader - function should not be called then
 
@@ -1107,7 +1088,7 @@ NO_INLINE float* sGetTerrainLayerGen(UFloat4* sData, CD3D9Renderer* r)
 	if (!r->m_RP.m_pRE)
 		return NULL;          // it seems the wrong material was assigned
 
-	CRenderElement* pRE = r->m_RP.m_pRE;
+	CRendElementBase* pRE = r->m_RP.m_pRE;
 
 	float* pData = (float*)pRE->m_CustomData;
 	if (pData)
@@ -1158,6 +1139,22 @@ float* sGetTexMatrix(UFloat4* sData, CD3D9Renderer* r, const SCGParam* ParamBind
 void sGetWind(UFloat4* sData, CD3D9Renderer* r)
 {
 	Vec4 pWind(0, 0, 0, 0);
+	SVegetationBending* pB;
+	CRenderObject* pObj = r->m_RP.m_pCurObject;
+	SRenderObjData* pOD = pObj->GetObjData();
+	if (pOD && (pB = &pOD->m_bending))
+	{
+		pWind.x = pB->m_vBending.x;
+		pWind.y = pB->m_vBending.y;
+
+		// Get phase variation based on object id
+		pWind.z = (float) ((INT_PTR) pObj->m_pRenderNode) / (float) (INT_MAX);
+		pWind.z *= 100000.0f;
+		pWind.z -= floorf(pWind.z);
+		pWind.z *= 10.0f;
+
+		pWind.w = pB->m_vBending.GetLength();
+	}
 
 	sData[0].f[0] = pWind.x;
 	sData[0].f[1] = pWind.y;
@@ -1302,6 +1299,32 @@ NO_INLINE void sGetBendInfo(UFloat4* sData, CD3D9Renderer* r, int* vals = NULL)
 {
 	const SRenderPipeline& RESTRICT_REFERENCE rRP = r->m_RP;
 	Vec4 vCurBending(0, 0, 0, 0);
+	CRenderObject* const __restrict pObj = rRP.m_pCurObject;
+	SBending bending;
+	// Set values to zero if no bending found - eg. trees created as geom entity and not vegetation,
+	// these are still rendered with bending/detailbending enabled in shader
+	// (very ineffective but they should not appear in real levels)
+	if (pObj->m_ObjFlags & FOB_BENDED)
+	{
+		Vec3 vObjPos = pObj->GetTranslation();
+
+		SVegetationBending& vb = pObj->GetObjData()->m_bending;
+		bending.m_vBending = vb.m_vBending;
+		bending.m_fMainBendingScale = vb.m_fMainBendingScale;
+		bending.m_Waves[0].m_Amp = vb.m_Waves[0].m_Amp;
+		bending.m_Waves[0].m_Freq = vb.m_Waves[0].m_Freq;
+		bending.m_Waves[0].m_Phase = vObjPos.x * 0.125f;
+		bending.m_Waves[0].m_Level = 0;
+		bending.m_Waves[0].m_eWFType = eWF_Sin;
+		bending.m_Waves[1].m_Amp = vb.m_Waves[1].m_Amp;
+		bending.m_Waves[1].m_Freq = vb.m_Waves[1].m_Freq;
+		bending.m_Waves[1].m_Phase = vObjPos.y * 0.125f;
+		bending.m_Waves[1].m_Level = 0;
+		bending.m_Waves[1].m_eWFType = eWF_Sin;
+
+		const float realTime = rRP.m_TI[rRP.m_nProcessThreadID].m_RealTime;
+		vCurBending = bending.GetShaderConstants(realTime);
+	}
 	*(alias_cast<Vec4*>(&sData[0])) = vCurBending;
 }
 
@@ -1950,6 +1973,10 @@ NO_INLINE void sAlphaTest(UFloat4* sData, const float dissolveRef)
 	sData[0].f[1] = (rRP.m_pCurObject->m_ObjFlags & FOB_DISSOLVE_OUT) ? 1.0f : -1.0f;
 	sData[0].f[2] = CRenderer::CV_r_ssdoAmountDirect;   // Use free component for SSDO
 	sData[0].f[3] = rRP.m_pShaderResources ? rRP.m_pShaderResources->m_AlphaRef : 0;
+
+	// specific condition for hair zpass - likely better having sAlphaTestHair
+	//if ((rRP.m_pShader->m_Flags2 & EF2_HAIR) && !(rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN))
+	//  sData[0].f[3] = 0.51f;
 }
 
 NO_INLINE void sFurParams(UFloat4* sData)
@@ -2190,6 +2217,33 @@ inline void sAppendClipSpaceAdaptation(Matrix44A* __restrict pTransform)
 #endif //defined(OPENGL) && CRY_OPENGL_MODIFY_PROJECTIONS
 }
 
+NO_INLINE void sOceanMat(UFloat4* sData)
+{
+	const CRenderCamera& cam(gRenDev->GetRCamera());
+
+	Matrix44A viewMat;
+	viewMat.m00 = cam.vX.x;
+	viewMat.m01 = cam.vY.x;
+	viewMat.m02 = cam.vZ.x;
+	viewMat.m03 = 0;
+	viewMat.m10 = cam.vX.y;
+	viewMat.m11 = cam.vY.y;
+	viewMat.m12 = cam.vZ.y;
+	viewMat.m13 = 0;
+	viewMat.m20 = cam.vX.z;
+	viewMat.m21 = cam.vY.z;
+	viewMat.m22 = cam.vZ.z;
+	viewMat.m23 = 0;
+	viewMat.m30 = 0;
+	viewMat.m31 = 0;
+	viewMat.m32 = 0;
+	viewMat.m33 = 1;
+	Matrix44A* pMat = alias_cast<Matrix44A*>(&sData[0]);
+	*pMat = viewMat * (*gRenDev->m_RP.m_TI[gRenDev->m_RP.m_nProcessThreadID].m_matProj->GetTop());
+	*pMat = pMat->GetTransposed();
+	sAppendClipSpaceAdaptation(pMat);
+}
+
 NO_INLINE void sResInfo(UFloat4* sData, int texIdx)    // EFTT_DIFFUSE, EFTT_GLOSS, ... etc (but NOT EFTT_BUMP!)
 {
 	sIdentityLine(sData);
@@ -2225,7 +2279,7 @@ NO_INLINE void sTexelDensityParam(UFloat4* sData)
 		int texHeight = 512;
 		int mipLevel = 0;
 
-		CRenderElement* pRE = gRenDev->m_RP.m_pRE;
+		CRendElementBase* pRE = gRenDev->m_RP.m_pRE;
 
 		if (pRE)
 		{
@@ -2255,7 +2309,7 @@ NO_INLINE void sTexelDensityParam(UFloat4* sData)
 				weight = pRenderChunk->m_texelAreaDensity * distance * distance * texWidth * texHeight * pRes->m_Textures[EFTT_DIFFUSE]->GetTiling(0) * pRes->m_Textures[EFTT_DIFFUSE]->GetTiling(1) / (screenHeight * screenHeight);
 			}
 
-			mipLevel = fastround_positive(0.5f * logf(max(weight, 1.0f)) / gf_ln2);
+			mipLevel = fastround_positive(0.5f * logf(max(weight, 1.0f)) / LN2);
 		}
 
 		texWidth /= (1 << mipLevel);
@@ -2288,7 +2342,7 @@ NO_INLINE void sTexelDensityColor(UFloat4* sData)
 			int texHeight = 512;
 			int mipLevel = 0;
 
-			CRenderElement* pRE = gRenDev->m_RP.m_pRE;
+			CRendElementBase* pRE = gRenDev->m_RP.m_pRE;
 
 			if (pRE)
 			{
@@ -2318,7 +2372,7 @@ NO_INLINE void sTexelDensityColor(UFloat4* sData)
 					weight = pRenderChunk->m_texelAreaDensity * distance * distance * texWidth * texHeight * pRes->m_Textures[EFTT_DIFFUSE]->GetTiling(0) * pRes->m_Textures[EFTT_DIFFUSE]->GetTiling(1) / (screenHeight * screenHeight);
 				}
 
-				mipLevel = fastround_positive(0.5f * logf(max(weight, 1.0f)) / gf_ln2);
+				mipLevel = fastround_positive(0.5f * logf(max(weight, 1.0f)) / LN2);
 			}
 
 			switch (mipLevel)
@@ -2392,6 +2446,29 @@ NO_INLINE void sNumInstructions(UFloat4* sData)
 	sData[0].f[0] = gRenDev->m_RP.m_NumShaderInstructions / CRenderer::CV_r_measureoverdrawscale / 256.0f;
 }
 
+NO_INLINE void sSkyColor(UFloat4* sData)
+{
+	CD3D9Renderer* const __restrict r = gcpRendD3D;
+	SCGParamsPF& PF = r->m_cEF.m_PF[r->m_RP.m_nProcessThreadID];
+	I3DEngine* pEng = gEnv->p3DEngine;
+	Vec3 v = pEng->GetSkyColor();
+	sData[0].f[0] = v.x;
+	sData[0].f[1] = v.y;
+	sData[0].f[2] = v.z;
+	sData[0].f[3] = true;   // only way of doing test without adding more permutations; srgb always enabled - after updating shader code side, this channel is free
+
+	if (CRenderer::CV_r_PostProcess && CRenderer::CV_r_NightVision == 1)
+	{
+		// If nightvision active, brighten up ambient
+		if (PF.bPE_NVActive)
+		{
+			sData[0].f[0] += 0.25f;  //0.75f;
+			sData[0].f[1] += 0.25f;  //0.75f;
+			sData[0].f[2] += 0.25f;  //0.75f;
+		}
+	}
+}
+
 NO_INLINE void sAmbient(UFloat4* sData, SRenderPipeline& rRP, const CRenderObject::SInstanceInfo& instInfo)
 {
 	sData[0].f[0] = instInfo.m_AmbColor[0];
@@ -2429,6 +2506,11 @@ NO_INLINE void sAmbientOpacity(UFloat4* sData, const CRenderObject::SInstanceInf
 
 	if (pObj->m_nMaterialLayers)
 		s3 *= sGetMaterialLayersOpacity(sData, r);
+
+#if defined(FEATURE_SVO_GI)
+	if ((rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN) && rRP.m_pShader && (rRP.m_pShader->GetShaderType() == eST_Vegetation) && CSvoRenderer::GetRsmColorMap(*rRP.m_ShadowInfo.m_pCurShadowFrustum))
+		s3 = min(s3, CSvoRenderer::GetInstance()->GetVegetationMaxOpacity());   // use softer occlusion for vegetation
+#endif
 
 	if (!(rRP.m_PersFlags2 & RBPF2_POST_3D_RENDERER_PASS))
 	{
@@ -2618,6 +2700,18 @@ NO_INLINE void sAvgFogVolumeContrib(UFloat4* sData)
 	}
 }
 
+NO_INLINE void sDepthFactor(UFloat4* sData, CD3D9Renderer* r)
+{
+	const CRenderCamera& rc = r->GetRCamera();
+	float zn = rc.fNear;
+	float zf = rc.fFar;
+	//sData[0].f[3] = -(zf/(zf-zn));
+	sData[0].f[3] = 0.0f;
+
+	sData[0].f[0] = 255.0 / 256.0;
+	sData[0].f[1] = 255.0 / 65536.0;
+	sData[0].f[2] = 255.0 / 16777216.0;
+}
 NO_INLINE void sNearFarDist(UFloat4* sData, CD3D9Renderer* r)
 {
 	const CRenderCamera& rc = r->GetRCamera();
@@ -2677,16 +2771,199 @@ NO_INLINE void sRTRect(UFloat4* sData, CD3D9Renderer* r)
 	sData[0].f[3] = r->m_cEF.m_RTRect.w;
 }
 
+#if defined(INCLUDE_SCALEFORM_SDK) || defined(CRY_FEATURE_SCALEFORM_HELPER)
+NO_INLINE void sSFCompMat(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* pParams(r->SF_GetGlobalDrawParams());
+	assert(pParams);
+	if (pParams)
+	{
+		Matrix44A& matComposite((Matrix44A&)sData[0].f[0]);
+		matComposite = *pParams->pTransMat;
+		sAppendClipSpaceAdaptation(&matComposite);
+	}
+}
+NO_INLINE void sSFTexGenMat0(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		const Matrix34A& mat(p->texture[0].texGenMat);
+		sData[0].f[0] = mat.m00;
+		sData[0].f[1] = mat.m01;
+		sData[0].f[2] = mat.m02;
+		sData[0].f[3] = mat.m03;
+
+		sData[1].f[0] = mat.m10;
+		sData[1].f[1] = mat.m11;
+		sData[1].f[2] = mat.m12;
+		sData[1].f[3] = mat.m13;
+	}
+}
+NO_INLINE void sSFTexGenMat1(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		const Matrix34A& mat(p->texture[1].texGenMat);
+		sData[0].f[0] = mat.m00;
+		sData[0].f[1] = mat.m01;
+		sData[0].f[2] = mat.m02;
+		sData[0].f[3] = mat.m03;
+
+		sData[1].f[0] = mat.m10;
+		sData[1].f[1] = mat.m11;
+		sData[1].f[2] = mat.m12;
+		sData[1].f[3] = mat.m13;
+	}
+}
+NO_INLINE void sSFBitmapColorTransform(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		const ColorF& col1st(p->colTransform1st);
+		const ColorF& col2nd(p->colTransform2nd);
+
+		sData[0].f[0] = col1st.r;
+		sData[0].f[1] = col1st.g;
+		sData[0].f[2] = col1st.b;
+		sData[0].f[3] = col1st.a;
+
+		sData[1].f[0] = col2nd.r;
+		sData[1].f[1] = col2nd.g;
+		sData[1].f[2] = col2nd.b;
+		sData[1].f[3] = col2nd.a;
+	}
+}
+NO_INLINE void sSFColorTransformMatrix(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		const ColorF* colMat(p->colTransformMat);
+		sData[0].f[0] = colMat[0].r;
+		sData[0].f[1] = colMat[1].r;
+		sData[0].f[2] = colMat[2].r;
+		sData[0].f[3] = colMat[3].r;
+
+		sData[1].f[0] = colMat[0].g;
+		sData[1].f[1] = colMat[1].g;
+		sData[1].f[2] = colMat[2].g;
+		sData[1].f[3] = colMat[3].g;
+
+		sData[2].f[0] = colMat[0].b;
+		sData[2].f[1] = colMat[1].b;
+		sData[2].f[2] = colMat[2].b;
+		sData[2].f[3] = colMat[3].b;
+
+		sData[3].f[0] = colMat[0].a;
+		sData[3].f[1] = colMat[1].a;
+		sData[3].f[2] = colMat[2].a;
+		sData[3].f[3] = colMat[3].a;
+	}
+}
+NO_INLINE void sSFStereoVideoFrameSelect(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		const ColorF& col1st(p->colTransform1st);
+		sData[0].f[0] = p->texGenYUVAStereo.x;
+		sData[0].f[1] = p->texGenYUVAStereo.y;
+		sData[0].f[2] = 0;
+		sData[0].f[3] = 0;
+	}
+}
+NO_INLINE void sSFPremultipliedAlpha(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		sData[0].f[0] = p->premultipliedAlpha ? 1.f : 0.f;
+		sData[0].f[1] = 0;
+		sData[0].f[2] = 0;
+		sData[0].f[3] = 0;
+	}
+}
+NO_INLINE void sSFBlurFilterSize(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		sData[0].f[0] = p->blurParams.blurFilterSize.x;
+		sData[0].f[1] = p->blurParams.blurFilterSize.y;
+		sData[0].f[2] = p->blurParams.blurFilterSize.z;
+		sData[0].f[3] = p->blurParams.blurFilterSize.w;
+	}
+}
+NO_INLINE void sSFBlurFilerScale(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		sData[0].f[0] = p->blurParams.blurFilterScale.x;
+		sData[0].f[1] = p->blurParams.blurFilterScale.y;
+		sData[0].f[2] = 0;
+		sData[0].f[3] = 0;
+	}
+}
+NO_INLINE void sSFBlurFilerOffset(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		sData[0].f[0] = p->blurParams.blurFilterOffset.x;
+		sData[0].f[1] = p->blurParams.blurFilterOffset.y;
+		sData[0].f[2] = 0;
+		sData[0].f[3] = 0;
+	}
+}
+NO_INLINE void sSFBlurFilerColor1(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		sData[0].f[0] = p->blurParams.blurFilterColor1.r;
+		sData[0].f[1] = p->blurParams.blurFilterColor1.g;
+		sData[0].f[2] = p->blurParams.blurFilterColor1.b;
+		sData[0].f[3] = p->blurParams.blurFilterColor1.a;
+	}
+}
+NO_INLINE void sSFBlurFilerColor2(UFloat4* sData, CD3D9Renderer* r)
+{
+	const SSF_GlobalDrawParams* p(r->SF_GetGlobalDrawParams());
+	assert(p);
+	if (p)
+	{
+		sData[0].f[0] = p->blurParams.blurFilterColor2.r;
+		sData[0].f[1] = p->blurParams.blurFilterColor2.g;
+		sData[0].f[2] = p->blurParams.blurFilterColor2.b;
+		sData[0].f[3] = p->blurParams.blurFilterColor2.a;
+	}
+}
+#endif
+
 }
 
-void CRenderer::UpdateConstParamsPF(const SRenderingPassInfo& passInfo)
+void CRenderer::UpdateConstParamsPF()
 {
 	// Per frame - hardcoded/fast - update of commonly used data - feel free to improve this
 	int nThreadID = m_RP.m_nFillThreadID;
 
 	SCGParamsPF& PF = gRenDev->m_cEF.m_PF[nThreadID];
 	uint32 nFrameID = gRenDev->m_RP.m_TI[nThreadID].m_nFrameUpdateID;
-	if (PF.nFrameID == nFrameID || passInfo.GetRenderView()->IsRecursive())
+	if (PF.nFrameID == nFrameID || IsRecursiveRenderView())
 		return;
 
 	PF.nFrameID = nFrameID;
@@ -2727,8 +3004,6 @@ void CRenderer::UpdateConstParamsPF(const SRenderingPassInfo& passInfo)
 
 	// ECGP_PF_SunColor
 	PF.pSunColor = p3DEngine->GetSunColor();
-	PF.pSunDirection = p3DEngine->GetSunDirNormalized();
-	PF.sunSpecularMultiplier = p3DEngine->GetGlobalParameter(E3DPARAM_SUN_SPECULAR_MULTIPLIER);
 	// ECGP_PF_SkyColor
 	PF.pSkyColor = p3DEngine->GetSkyColor();
 
@@ -2746,7 +3021,8 @@ void CRenderer::UpdateConstParamsPF(const SRenderingPassInfo& passInfo)
 	cloudShadowOffset.x -= (int) cloudShadowOffset.x;
 	cloudShadowOffset.y -= (int) cloudShadowOffset.y;
 
-	if (CVolumetricCloudsStage::IsRenderable())
+	CD3D9Renderer* const __restrict r = gcpRendD3D;
+	if (r->GetVolumetricCloud().IsRenderable())
 	{
 		gEnv->p3DEngine->GetGlobalParameter(E3DPARAM_VOLCLOUD_TILING_OFFSET, PF.pVolCloudTilingOffset);
 		gEnv->p3DEngine->GetGlobalParameter(E3DPARAM_VOLCLOUD_TILING_SIZE, PF.pVolCloudTilingSize);
@@ -2774,7 +3050,7 @@ void CRenderer::UpdateConstParamsPF(const SRenderingPassInfo& passInfo)
 		// ECGP_PB_CloudShadowAnimParams
 		const Vec2 cloudOffset(PF.pVolCloudTilingOffset.x, PF.pVolCloudTilingOffset.y);
 		const Vec2 vTiling(cloudShadowTilingSize.z, cloudShadowTilingSize.z);
-		PF.pCloudShadowAnimParams = CVolumetricCloudsStage::GetVolumetricCloudShadowParams(gRenDev->GetRCamera(), cloudOffset, vTiling);
+		PF.pCloudShadowAnimParams = r->GetVolumetricCloud().GetVolumetricCloudShadowParam(gcpRendD3D, cloudOffset, vTiling);
 	}
 	else
 	{
@@ -2830,18 +3106,6 @@ void CRenderer::UpdateConstParamsPF(const SRenderingPassInfo& passInfo)
 
 	// ECGP_PB_VolumetricFogDistanceParams
 	PF.pVolumetricFogDistanceParams = sGetVolumetricFogDistanceParams(gcpRendD3D);
-
-	// irregular filter kernel for shadow map sampling
-	EShaderQuality shaderQuality = gRenDev->m_cEF.m_ShaderProfiles[eST_Shadow].GetShaderQuality();
-	int32 sampleCountByQuality[eSQ_Max] =
-	{
-		4,  // eSQ_Low
-		8,  // eSQ_Medium
-		16, // eSQ_High
-		16, // eSQ_VeryHigh
-	};
-	ZeroArray(PF.irregularFilterKernel);
-	CShadowUtils::GetIrregKernel(PF.irregularFilterKernel, sampleCountByQuality[shaderQuality]);
 }
 
 void CHWShader_D3D::mfCommitParamsMaterial()
@@ -2894,15 +3158,83 @@ void CHWShader_D3D::mfCommitParamsGlobal()
 		mfSetTextures(s_PF_Textures, eHWSC_Pixel);      // Per-frame textures
 		mfSetSamplers_Old(s_PF_Samplers, eHWSC_Pixel);  // Per-frame samplers
 
+		mfSetPF(); // Per-frame parameters
 		mfSetCM(); // Per-camera parameters
 		mfSetPV(); // Per-view parameters
 	}
 
+	if (rRP.m_PersFlags2 & (RBPF2_COMMIT_SG))
+	{
+		rRP.m_PersFlags2 &= ~(RBPF2_COMMIT_SG);
+		mfSetSG(); // Shadow-gen parameters
+	}
+
+	mfCommitCB(CB_PER_FRAME, eHWSC_Vertex, eHWSC_Vertex);
+	mfCommitCB(CB_PER_SHADOWGEN, eHWSC_Vertex, eHWSC_Vertex);
+
+	mfCommitCB(CB_PER_FRAME, eHWSC_Pixel, eHWSC_Pixel);
+	mfCommitCB(CB_PER_SHADOWGEN, eHWSC_Pixel, eHWSC_Pixel);
+
+	if (s_pCurInstGS)
+	{
+		mfCommitCB(CB_PER_FRAME, eHWSC_Geometry, eHWSC_Geometry);
+		mfCommitCB(CB_PER_SHADOWGEN, eHWSC_Geometry, eHWSC_Geometry);
+	}
+	else
+	{
+		mfFreeCB(CB_PER_FRAME, eHWSC_Geometry);
+		mfFreeCB(CB_PER_SHADOWGEN, eHWSC_Geometry);
+	}
+
+	if (s_pCurInstHS)
+	{
+		mfCommitCB(CB_PER_FRAME, eHWSC_Domain, eHWSC_Domain);
+		mfCommitCB(CB_PER_SHADOWGEN, eHWSC_Domain, eHWSC_Domain);
+
+		mfCommitCB(CB_PER_FRAME, eHWSC_Hull, eHWSC_Hull);
+		mfCommitCB(CB_PER_SHADOWGEN, eHWSC_Hull, eHWSC_Hull);
+	}
+	else
+	{
+		mfFreeCB(CB_PER_FRAME, eHWSC_Domain);
+		mfFreeCB(CB_PER_SHADOWGEN, eHWSC_Domain);
+
+		mfFreeCB(CB_PER_FRAME, eHWSC_Hull);
+		mfFreeCB(CB_PER_SHADOWGEN, eHWSC_Hull);
+	}
 
 	if (s_pCurInstCS)
 	{
+		mfCommitCB(CB_PER_FRAME, eHWSC_Compute, eHWSC_Compute);
+		mfCommitCB(CB_PER_SHADOWGEN, eHWSC_Compute, eHWSC_Compute);
+	}
+	else
+	{
+		mfFreeCB(CB_PER_FRAME, eHWSC_Compute);
+		mfFreeCB(CB_PER_SHADOWGEN, eHWSC_Compute);
+	}
+
+	if (s_pCurReqCB[eHWSC_Pixel][CB_PER_LIGHT])
+		mfSetCB(eHWSC_Pixel, CB_PER_LIGHT, s_pCurReqCB[eHWSC_Pixel][CB_PER_LIGHT]);
+	if (s_pCurReqCB[eHWSC_Vertex][CB_PER_LIGHT])
+		mfSetCB(eHWSC_Vertex, CB_PER_LIGHT, s_pCurReqCB[eHWSC_Vertex][CB_PER_LIGHT]);
+
+	if (s_pCurInstGS)
+		mfSetCB(eHWSC_Geometry, CB_PER_FRAME, s_pCurReqCB[eHWSC_Geometry][CB_PER_FRAME]);
+	if (s_pCurInstHS)
+	{
+		mfSetCB(eHWSC_Hull, CB_PER_FRAME, s_pCurReqCB[eHWSC_Hull][CB_PER_FRAME]);
+		mfSetCB(eHWSC_Domain, CB_PER_FRAME, s_pCurReqCB[eHWSC_Domain][CB_PER_FRAME]);
+	}
+	if (s_pCurInstCS)
+	{
+		mfSetCB(eHWSC_Compute, CB_PER_FRAME, s_pCurReqCB[eHWSC_Compute][CB_PER_FRAME]);
 		mfSetCB(eHWSC_Compute, CB_PER_BATCH, s_pCurReqCB[eHWSC_Compute][CB_PER_BATCH]);
 	}
+	if (s_pCurReqCB[eHWSC_Geometry][CB_PER_LIGHT])
+		mfSetCB(eHWSC_Geometry, CB_PER_LIGHT, s_pCurReqCB[eHWSC_Geometry][CB_PER_LIGHT]);
+	if (s_pCurReqCB[eHWSC_Compute][CB_PER_LIGHT])
+		mfSetCB(eHWSC_Compute, CB_PER_LIGHT, s_pCurReqCB[eHWSC_Compute][CB_PER_LIGHT]);
 }
 
 void CHWShader_D3D::mfCommitParams()
@@ -3049,7 +3381,7 @@ float* CHWShader_D3D::mfSetParametersPI(SCGParam* pParams, const int nINParams, 
 					TransposeAndStore(sData, r->m_CameraProjMatrix);
 				else
 				{
-					mathMatrixMultiply_Transp2(&sData[4].f[0], r->m_CameraProjMatrix.GetData(), rInstInfo.m_Matrix.GetData());
+					mathMatrixMultiply_Transp2(&sData[4].f[0], r->m_CameraProjMatrix.GetData(), rInstInfo.m_Matrix.GetData(), g_CpuFlags);
 					TransposeAndStore(sData, *alias_cast<Matrix44A*>(&sData[4]));
 				}
 				sAppendClipSpaceAdaptation(alias_cast<Matrix44A*>(&sData[0]));
@@ -3156,6 +3488,9 @@ float* CHWShader_D3D::mfSetParametersPI(SCGParam* pParams, const int nINParams, 
 			break;
 		case ECGP_PI_NumInstructions:
 			sNumInstructions(sData);
+			break;
+		case ECGP_Matr_PI_OceanMat:
+			sOceanMat(sData);
 			break;
 		default:
 			assert(0);
@@ -3334,7 +3669,7 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 {
 	DETAILED_PROFILE_MARKER("mfSetParameters");
 	PROFILE_FRAME(Shader_SetParams);
-	CRenderElement* pRE;
+	CRendElementBase* pRE;
 	float* pSrc, * pData;
 	Vec3 v;
 	Vec4 v4;
@@ -3352,6 +3687,14 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 	const Vec3& vCamPos = r->GetRCamera().vOrigin;
 
 	UFloat4* sData = sDataBuffer; // data length must not exceed the lenght of sDataBuffer [=sozeof(36*float4)]
+
+	for (int i = 0; i < nINParams; i++)
+	{
+		if (pParams[i].m_eCGParamType == ECGP_PF_ProjRatio)
+		{
+			g_nCount++;
+		}
+	}
 
 	float* pOutBufferTemp = pOutBuffer;
 	uint32 nOutBufferSize = 0;
@@ -3384,11 +3727,74 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 
 			switch (paramType & 0xff)
 			{
-				case ECGP_Matr_PB_ViewProjMatrixPrev:
+			case ECGP_Matr_PF_ViewProjMatrix:
+				{
+					TransposeAndStore(sData, r->m_CameraProjMatrix);
+					break;
+				}
+			case ECGP_Matr_PF_ViewProjMatrixPrev:
 				{
 					TransposeAndStore(sData, r->m_CameraProjMatrixPrev);
 					break;
 				}
+			case ECGP_Matr_PF_ViewProjZeroMatrix:
+				{
+					//TransposeAndStore(sData, r->m_CameraProjMatrix);
+					TransposeAndStore(sData, r->m_CameraProjZeroMatrix);
+					break;
+				}
+			case ECGP_Matr_PB_ViewProjMatrix_I:
+				{
+					TransposeAndStore(sData, r->m_InvCameraProjMatrix);
+					break;
+				}
+			case ECGP_Matr_PB_ViewProjMatrix_IT:
+				{
+					assert(0);
+					break;
+				}
+			case ECGP_PF_FrustumPlaneEquation:
+				{
+					CCamera* pRC;
+					const SRenderPipeline::ShadowInfo& shadowInfo = rRP.m_ShadowInfo;
+					if ((rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN) && shadowInfo.m_pCurShadowFrustum)
+					{
+						assert(shadowInfo.m_nOmniLightSide >= 0 && shadowInfo.m_nOmniLightSide < OMNI_SIDES_NUM);
+						pRC = &(shadowInfo.m_pCurShadowFrustum->FrustumPlanes[shadowInfo.m_nOmniLightSide]);
+					}
+					else
+						pRC = &(rRP.m_TI[rRP.m_nProcessThreadID].m_cam);
+					Matrix44A* pMat = alias_cast<Matrix44A*>(&sData[0]);
+					pMat->SetRow4(0, (Vec4&)*pRC->GetFrustumPlane(FR_PLANE_RIGHT));
+					pMat->SetRow4(1, (Vec4&)*pRC->GetFrustumPlane(FR_PLANE_LEFT));
+					pMat->SetRow4(2, (Vec4&)*pRC->GetFrustumPlane(FR_PLANE_TOP));
+					pMat->SetRow4(3, (Vec4&)*pRC->GetFrustumPlane(FR_PLANE_BOTTOM));
+					break;
+				}
+			case ECGP_PF_ShadowLightPos:
+				if ((rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN) && rRP.m_ShadowInfo.m_pCurShadowFrustum)
+				{
+					const ShadowMapFrustum* pFrust = rRP.m_ShadowInfo.m_pCurShadowFrustum;
+					const Vec3 vLPos = Vec3(
+					  pFrust->vLightSrcRelPos.x + pFrust->vProjTranslation.x,
+					  pFrust->vLightSrcRelPos.y + pFrust->vProjTranslation.y,
+					  pFrust->vLightSrcRelPos.z + pFrust->vProjTranslation.z
+					  );
+					sData[0].f[0] = vLPos.x;
+					sData[0].f[1] = vLPos.y;
+					sData[0].f[2] = vLPos.z;
+				}
+				break;
+			case ECGP_PF_ShadowViewPos:
+				if ((rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN) && rRP.m_ShadowInfo.m_pCurShadowFrustum)
+				{
+					const Vec3& vViewPos = rRP.m_ShadowInfo.vViewerPos;
+					sData[0].f[0] = vViewPos.x;
+					sData[0].f[1] = vViewPos.y;
+					sData[0].f[2] = vViewPos.z;
+				}
+				break;
+
 			case ECGP_Matr_PB_TerrainBase:
 				pSrc = sGetTerrainBase(sData, r);
 				break;
@@ -3558,13 +3964,7 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 
 			case ECGP_PB_VolumetricFogGlobalEnvProbe0:
 				{
-					Vec4 param(0.0f);
-					if ((r->m_nGraphicsPipeline) > 0)
-					{
-						auto pStage = r->GetGraphicsPipeline().GetVolumetricFogStage();
-						CRY_ASSERT(pStage);
-						param = pStage->GetGlobalEnvProbeShaderParam0();
-					}
+					const Vec4& param = r->GetVolumetricFog().GetGlobalEnvProbeShaderParam0();
 					sData[0].f[0] = param.x;
 					sData[0].f[1] = param.y;
 					sData[0].f[2] = param.z;
@@ -3574,13 +3974,7 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 
 			case ECGP_PB_VolumetricFogGlobalEnvProbe1:
 				{
-					Vec4 param(0.0f);
-					if ((r->m_nGraphicsPipeline) > 0)
-					{
-						auto pStage = r->GetGraphicsPipeline().GetVolumetricFogStage();
-						CRY_ASSERT(pStage);
-						param = pStage->GetGlobalEnvProbeShaderParam1();
-					}
+					const Vec4& param = r->GetVolumetricFog().GetGlobalEnvProbeShaderParam1();
 					sData[0].f[0] = param.x;
 					sData[0].f[1] = param.y;
 					sData[0].f[2] = param.z;
@@ -3799,7 +4193,7 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 				sData[0].f[3] = PF.pCausticsParams.x;
 				break;
 
-			case ECGP_PB_SunColor:
+			case ECGP_PF_SunColor:
 				{
 					const SRenderLight* pLight = r->m_RP.m_pSunLight;
 					if (pLight)
@@ -3817,44 +4211,134 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 					break;
 				}
 
+			case ECGP_PF_SkyColor:
+				sSkyColor(sData);
+				break;
+
 			case ECGP_PB_CausticsSmoothSunDirection:
 				sCausticsSmoothSunDirection(sData);
 				break;
 
-			case ECGP_PB_SunDirection:
+			case ECGP_PF_SunDirection:
 				sSunDirection(sData);
 				break;
-			case ECGP_PB_CameraPos:
+			case ECGP_PF_FogColor:
+				sData[0].f[0] = rRP.m_TI[rRP.m_nProcessThreadID].m_FS.m_CurColor[0];
+				sData[0].f[1] = rRP.m_TI[rRP.m_nProcessThreadID].m_FS.m_CurColor[1];
+				sData[0].f[2] = rRP.m_TI[rRP.m_nProcessThreadID].m_FS.m_CurColor[2];
+				sData[0].f[3] = 0.0f;
+				break;
+			case ECGP_PF_CameraPos:
 				sData[0].f[0] = vCamPos.x;
 				sData[0].f[1] = vCamPos.y;
 				sData[0].f[2] = vCamPos.z;
 				sData[0].f[3] = (rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_MIRRORCULL) ? -1.0f : 1.0f;
 				break;
-			case ECGP_PB_HPosScale:
+			case ECGP_PF_HPosScale:
 				sData[0].f[0] = rRP.m_CurDownscaleFactor.x;
 				sData[0].f[1] = rRP.m_CurDownscaleFactor.y;
 				sData[0].f[2] = r->m_PrevViewportScale.x;
 				sData[0].f[3] = r->m_PrevViewportScale.y;
 				break;
-			case ECGP_PB_ScreenSize:
+			case ECGP_PF_ScreenSize:
 				sGetScreenSize(sData, r);
 				break;
-			case ECGP_PB_Time:
+			case ECGP_PF_Time:
 				//sData[0].f[nComp] = r->m_RP.m_ShaderCurrTime; //r->m_RP.m_RealTime;
 				sData[0].f[nComp] = rRP.m_TI[rRP.m_nProcessThreadID].m_RealTime;
 				assert(ParamBind->m_pData);
 				if (ParamBind->m_pData)
 					sData[0].f[nComp] *= ParamBind->m_pData->d.fData[nComp];
 				break;
-			case ECGP_PB_FrameTime:
+			case ECGP_PF_FrameTime:
 				sData[0].f[nComp] = 1.f / gEnv->pTimer->GetFrameTime();
 				assert(ParamBind->m_pData);
 				if (ParamBind->m_pData)
 					sData[0].f[nComp] *= ParamBind->m_pData->d.fData[nComp];
 				break;
-			case ECGP_PB_NearFarDist:
+			case ECGP_PF_ProjRatio:
+				{
+					const CRenderCamera& rc = r->GetRCamera();
+					float zn = rc.fNear;
+					float zf = rc.fFar;
+					float hfov = r->GetCamera().GetHorizontalFov();
+
+					const bool bReverseDepth = (rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_REVERSE_DEPTH) != 0;
+					sData[0].f[0] = bReverseDepth ? zn / (zn - zf) : zf / (zf - zn);
+					sData[0].f[1] = bReverseDepth ? zn / (zf - zn) : zn / (zn - zf);
+					sData[0].f[2] = 1.0f / hfov;
+					sData[0].f[3] = 1.0f;
+				}
+				break;
+			case ECGP_PF_NearestScaled:
+				{
+					const CRenderCamera& rc = r->GetRCamera();
+					I3DEngine* pEng = gEnv->p3DEngine;
+
+					float zn = rc.fNear;
+					float zf = rc.fFar;
+
+					//////////////////////////////////////////////////////////////////////////
+					float fNearZRange = r->CV_r_DrawNearZRange;
+					float fCamScale = (r->CV_r_DrawNearFarPlane / pEng->GetMaxViewDistance());
+
+					//float fDevDepthScale = 1.0f/fNearZRange;
+					float fCombinedScale = fNearZRange * fCamScale;
+					//float2 ProjRatioScale = float2((1.0f/fDevDepthScale), fCombinedScale);
+					//////////////////////////////////////////////////////////////////////////
+
+					const bool bReverseDepth = (r->m_RP.m_TI[r->m_RP.m_nProcessThreadID].m_PersFlags & RBPF_REVERSE_DEPTH) != 0;
+					sData[0].f[0] = bReverseDepth ? 1.0f - zf / (zf - zn) * fNearZRange : zf / (zf - zn) * fNearZRange;
+					sData[0].f[1] = bReverseDepth ? zn / (zf - zn) * fNearZRange * fNearZRange : zn / (zn - zf) * fNearZRange * fNearZRange; // fCombinedScale;
+					sData[0].f[2] = bReverseDepth ? 1.0f - (fNearZRange - 0.001f) : fNearZRange - 0.001f;
+					sData[0].f[3] = 1.0f;
+
+				}
+				break;
+			case ECGP_PF_DepthFactor:
+				sDepthFactor(sData, r);
+				break;
+			case ECGP_PF_NearFarDist:
 				sNearFarDist(sData, r);
 				break;
+#if defined(INCLUDE_SCALEFORM_SDK) || defined(CRY_FEATURE_SCALEFORM_HELPER)
+			case ECGP_Matr_PB_SFCompMat:
+				sSFCompMat(sData, r);
+				break;
+			case ECGP_Matr_PB_SFTexGenMat0:
+				sSFTexGenMat0(sData, r);
+				break;
+			case ECGP_Matr_PB_SFTexGenMat1:
+				sSFTexGenMat1(sData, r);
+				break;
+			case ECGP_PB_SFBitmapColorTransform:
+				sSFBitmapColorTransform(sData, r);
+				break;
+			case ECGP_PB_SFColorTransformMatrix:
+				sSFColorTransformMatrix(sData, r);
+				break;
+			case ECGP_PB_SFStereoVideoFrameSelect:
+				sSFStereoVideoFrameSelect(sData, r);
+				break;
+			case ECGP_PB_SFPremultipliedAlpha:
+				sSFPremultipliedAlpha(sData, r);
+				break;
+			case ECGP_PB_SFBlurFilterSize:
+				sSFBlurFilterSize(sData, r);
+				break;
+			case ECGP_PB_SFBlurFilterScale:
+				sSFBlurFilerScale(sData, r);
+				break;
+			case ECGP_PB_SFBlurFilterOffset:
+				sSFBlurFilerOffset(sData, r);
+				break;
+			case ECGP_PB_SFBlurFilterColor1:
+				sSFBlurFilerColor1(sData, r);
+				break;
+			case ECGP_PB_SFBlurFilterColor2:
+				sSFBlurFilerColor2(sData, r);
+				break;
+#endif
 			case ECGP_PB_CloudShadingColorSun:
 				sData[0].f[0] = PF.pCloudShadingColorSun.x;
 				sData[0].f[1] = PF.pCloudShadingColorSun.y;
@@ -3894,7 +4378,10 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 					sData[0].f[1] = (rRP.m_pCurObject->m_ObjFlags & FOB_DISSOLVE_OUT) ? 1.0f : -1.0f;
 					sData[0].f[2] = 0;
 					sData[0].f[3] = rRP.m_pShaderResources ? rRP.m_pShaderResources->m_AlphaRef : 0;
-
+					// specific condition for hair zpass - likely better having sAlphaTestHair
+					//if ((rRP.m_pShader->m_Flags2 & EF2_HAIR) && !(rRP.m_TI[rRP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN))
+					//	sData[0].f[3] = 0.51f;
+					// specific condition for particles - likely better having sAlphaTestParticles
 					if (!rRP.m_pShaderResources && (rRP.m_nPassGroupID == EFSLIST_TRANSP || rRP.m_nPassGroupID == EFSLIST_HALFRES_PARTICLES))
 					{
 						const SRenderObjData* pOD = rRP.m_pCurObject->GetObjData();
@@ -3935,6 +4422,32 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 			case ECGP_PB_VisionMtlParams:
 				sVisionMtlParams(sData);
 				break;
+			case ECGP_Matr_PB_GIGridMatrix:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							Matrix44A* pMat = alias_cast<Matrix44A*>(&sData[0]);
+							*pMat = pGIVolume->GetRenderSettings().m_mat;
+						}
+					}
+					break;
+				}
+			case ECGP_Matr_PB_GIInvGridMatrix:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							Matrix44A* pMat = alias_cast<Matrix44A*>(&sData[0]);
+							*pMat = pGIVolume->GetRenderSettings().m_matInv;
+						}
+					}
+					break;
+				}
 			case ECGP_Matr_PB_TCMMatrix:
 				{
 					SEfResTexture* pRT = rRP.m_ShaderTexResources[ParamBind->m_nID];
@@ -3946,17 +4459,106 @@ void CHWShader_D3D::mfSetParameters(SCGParam* pParams, const int nINParams, EHWS
 					}
 					break;
 				}
+			case ECGP_PB_GIGridSize:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							const Vec4& vSize = pGIVolume->GetRenderSettings().m_gridDimensions;
+							sData[0].f[0] = vSize.x;
+							sData[0].f[1] = vSize.y;
+							sData[0].f[2] = vSize.z;
+							sData[0].f[3] = vSize.w;
+						}
+					}
+					break;
+				}
+			case ECGP_PB_GIInvGridSize:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							const Vec4& vInvSize = pGIVolume->GetRenderSettings().m_invGridDimensions;
+							sData[0].f[0] = vInvSize.x;
+							sData[0].f[1] = vInvSize.y;
+							sData[0].f[2] = vInvSize.z;
+							sData[0].f[3] = vInvSize.w;
+						}
+					}
+					break;
+				}
+			case ECGP_PB_GIGridSpaceCamPos:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							const Vec4 vGridSpaceCamPos(pGIVolume->GetRenderSettings().m_mat.TransformPoint(vCamPos), 1.f);
+							sData[0].f[0] = vGridSpaceCamPos.x;
+							sData[0].f[1] = vGridSpaceCamPos.y;
+							sData[0].f[2] = vGridSpaceCamPos.z;
+							sData[0].f[3] = vGridSpaceCamPos.w;
+						}
+					}
+					break;
+				}
+			case ECGP_PB_GIAttenuation:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							const float d = pGIVolume->GetVisibleDistance() * .5f;
+							const float offset = min(d * .5f, 20.f);
+							// att(d) = kd+b;
+							const float k = -1.f / offset;
+							const float b = d / offset;
+							float fGIAmount = pGIVolume->GetIntensity() * gEnv->p3DEngine->GetGIAmount();
+							// Apply LBuffers range rescale
+							fGIAmount *= gcpRendD3D->m_fAdaptedSceneScaleLBuffer;
+							const Vec4 vAttenuation(k, b, fGIAmount, CRenderer::CV_r_ParticlesAmountGI);
+							sData[0].f[0] = vAttenuation.x;
+							sData[0].f[1] = vAttenuation.y;
+							sData[0].f[2] = vAttenuation.z;
+							sData[0].f[3] = vAttenuation.w;
+						}
+					}
+					break;
+				}
+			case ECGP_PB_GIGridCenter:
+				{
+					if (LPVManager.IsGIRenderable())
+					{
+						CRELightPropagationVolume* pGIVolume = LPVManager.GetCurrentGIVolume();
+						if (pGIVolume)
+						{
+							const Vec3 gridCenter = pGIVolume->GetRenderSettings().m_matInv.TransformPoint(Vec3(.5f, .5f, .5f));
+							Vec4 vGridCenter(gridCenter, 0);
+							sData[0].f[0] = vGridCenter.x;
+							sData[0].f[1] = vGridCenter.y;
+							sData[0].f[2] = vGridCenter.z;
+							sData[0].f[3] = vGridCenter.w;
+						}
+					}
+					break;
+				}
 
 			case ECGP_PB_WaterRipplesLookupParams:
-				if ((r->m_nGraphicsPipeline) > 0)
+				if (CPostEffectsMgr* pPostEffectsMgr = PostEffectMgr())
 				{
-					auto pStage = r->GetGraphicsPipeline().GetWaterRipplesStage();
-					CRY_ASSERT(pStage);
-					auto param = pStage->GetWaterRippleLookupParam();
-					sData[0].f[0] = param.x;
-					sData[0].f[1] = param.y;
-					sData[0].f[2] = param.z;
-					sData[0].f[3] = param.w;
+					if (CWaterRipples* pWaterRipplesTech = (CWaterRipples*)pPostEffectsMgr->GetEffect(ePFX_WaterRipples))
+					{
+						sData[0].f[0] = pWaterRipplesTech->GetLookupParams().x;
+						sData[0].f[1] = pWaterRipplesTech->GetLookupParams().y;
+						sData[0].f[2] = pWaterRipplesTech->GetLookupParams().z;
+						sData[0].f[3] = pWaterRipplesTech->GetLookupParams().w;
+					}
 				}
 				break;
 
@@ -4046,7 +4648,7 @@ void CHWShader_D3D::GetReflectedShaderParameters(CRenderObject* pForRenderObject
 	CRenderObject* pPrevObj = rendPipeline.m_pCurObject;
 	CShader* pPrevShader = rendPipeline.m_pShader;
 	CShaderResources* pPrevRes = rendPipeline.m_pShaderResources;
-	CRenderElement* pPrevRE = rendPipeline.m_pRE;
+	CRendElementBase* pPrevRE = rendPipeline.m_pRE;
 
 	rendPipeline.m_pCurObject = pForRenderObject;
 	rendPipeline.m_pShader = (CShader*)shaderItem.m_pShader;
@@ -4256,12 +4858,14 @@ bool CHWShader_D3D::mfSetSamplers(const std::vector<SCGSampler>& Samplers, EHWSh
 
 		case ECGS_TrilinearClamp:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nTrilinearClampSampler, nSUnit, eSHClass);
+				const static int nTStateTrilinearClamp = CTexture::GetTexState(STexState(FILTER_TRILINEAR, true));
+				CTexture::SetSamplerState(nTStateTrilinearClamp, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_TrilinearWrap:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nTrilinearWrapSampler, nSUnit, eSHClass);
+				const static int nTStateTrilinearWrap = CTexture::GetTexState(STexState(FILTER_TRILINEAR, false));
+				CTexture::SetSamplerState(nTStateTrilinearWrap, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_MatAnisoHighWrap:
@@ -4276,22 +4880,26 @@ bool CHWShader_D3D::mfSetSamplers(const std::vector<SCGSampler>& Samplers, EHWSh
 			break;
 		case ECGS_MatTrilinearWrap:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nTrilinearWrapSampler, nSUnit, eSHClass);
+				const static int nTStateTrilinearWrap = CTexture::GetTexState(STexState(FILTER_TRILINEAR, false));
+				CTexture::SetSamplerState(nTStateTrilinearWrap, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_MatBilinearWrap:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nBilinearWrapSampler, nSUnit, eSHClass);
+				const static int nTStateBilinearWrap = CTexture::GetTexState(STexState(FILTER_BILINEAR, false));
+				CTexture::SetSamplerState(nTStateBilinearWrap, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_MatTrilinearClamp:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nTrilinearClampSampler, nSUnit, eSHClass);
+				const static int nTStateTrilinearClamp = CTexture::GetTexState(STexState(FILTER_TRILINEAR, true));
+				CTexture::SetSamplerState(nTStateTrilinearClamp, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_MatBilinearClamp:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nBilinearClampSampler, nSUnit, eSHClass);
+				const static int nTStateBilinearClamp = CTexture::GetTexState(STexState(FILTER_BILINEAR, true));
+				CTexture::SetSamplerState(nTStateBilinearClamp, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_MatAnisoHighBorder:
@@ -4301,7 +4909,8 @@ bool CHWShader_D3D::mfSetSamplers(const std::vector<SCGSampler>& Samplers, EHWSh
 			break;
 		case ECGS_MatTrilinearBorder:
 			{
-				CTexture::SetSamplerState(gcpRendD3D->m_nTrilinearBorderSampler, nSUnit, eSHClass);
+				const static int nTStateTrilinearBorder = CTexture::GetTexState(STexState(FILTER_TRILINEAR, TADDR_BORDER, TADDR_BORDER, TADDR_BORDER, 0x0));
+				CTexture::SetSamplerState(nTStateTrilinearBorder, nSUnit, eSHClass);
 			}
 			break;
 		case ECGS_PointClamp:
@@ -4314,7 +4923,6 @@ bool CHWShader_D3D::mfSetSamplers(const std::vector<SCGSampler>& Samplers, EHWSh
 				CTexture::SetSamplerState(gcpRendD3D->m_nPointWrapSampler, nSUnit, eSHClass);
 			}
 			break;
-
 		default:
 			assert(0);
 			break;
@@ -4408,6 +5016,53 @@ bool CHWShader_D3D::mfSetTextures(const std::vector<SCGTexture>& Textures, EHWSh
 				}
 			}
 			break;
+
+#if defined(INCLUDE_SCALEFORM_SDK) || defined(CRY_FEATURE_SCALEFORM_HELPER)
+		case ECGT_SF_Slot0:
+		case ECGT_SF_Slot1:
+		case ECGT_SF_SlotY:
+		case ECGT_SF_SlotU:
+		case ECGT_SF_SlotV:
+		case ECGT_SF_SlotA:
+			{
+				const SSF_GlobalDrawParams* pParams = rd->SF_GetGlobalDrawParams();
+				assert(pParams);
+				if (pParams)
+				{
+					int texIdx = pTexBind->m_eCGTextureType - ECGT_SF_Slot0;
+					int texID = -1;
+
+					if (texIdx < 2)
+					{
+						texID = pParams->texture[texIdx].texID;
+					}
+					else
+					{
+						assert(texIdx < 6);
+						texID = pParams->texID_YUVA[texIdx - 2];
+						texIdx = 0;
+					}
+
+					if (texID > 0)
+					{
+						const static int texStateID[8] =
+						{
+							CTexture::GetTexState(STexState(FILTER_POINT,     false)), CTexture::GetTexState(STexState(FILTER_POINT,     true)),
+							CTexture::GetTexState(STexState(FILTER_LINEAR,    false)), CTexture::GetTexState(STexState(FILTER_LINEAR,    true)),
+							CTexture::GetTexState(STexState(FILTER_TRILINEAR, false)), CTexture::GetTexState(STexState(FILTER_TRILINEAR, true)),
+							-1,                                               -1
+						};
+
+						CTexture* pTex = CTexture::GetByID(texID);
+						int textStateID = texStateID[pParams->texture[texIdx].texState];
+						pTex->Apply(nTUnit, textStateID);
+						break;
+					}
+				}
+				CTexture::s_ptexWhite->Apply(nTUnit);
+				break;
+			}
+#endif
 
 		case ECGT_Shadow0:
 		case ECGT_Shadow1:
@@ -4594,28 +5249,16 @@ bool CHWShader_D3D::mfSetTextures(const std::vector<SCGTexture>& Textures, EHWSh
 			break;
 		case ECGT_VolumetricFogGlobalEnvProbe0:
 			{
-				CTexture* pTex = nullptr;
-				if ((rd->m_nGraphicsPipeline) > 0)
-				{
-					auto pStage = rd->GetGraphicsPipeline().GetVolumetricFogStage();
-					CRY_ASSERT(pStage);
-					pTex = pStage->GetGlobalEnvProbeTex0();
-				}
-				pTex = (pTex != nullptr) ? pTex : CTexture::s_ptexBlackCM;
-				pTex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
+				CTexture* tex = rd->GetVolumetricFog().GetGlobalEnvProbeTex0();
+				tex = (tex != NULL) ? tex : CTexture::s_ptexBlackCM;
+				tex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
 			}
 			break;
 		case ECGT_VolumetricFogGlobalEnvProbe1:
 			{
-				CTexture* pTex = nullptr;
-				if ((rd->m_nGraphicsPipeline) > 0)
-				{
-					auto pStage = rd->GetGraphicsPipeline().GetVolumetricFogStage();
-					CRY_ASSERT(pStage);
-					pTex = pStage->GetGlobalEnvProbeTex1();
-				}
-				pTex = (pTex != nullptr) ? pTex : CTexture::s_ptexBlackCM;
-				pTex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
+				CTexture* tex = rd->GetVolumetricFog().GetGlobalEnvProbeTex1();
+				tex = (tex != NULL) ? tex : CTexture::s_ptexBlackCM;
+				tex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
 			}
 			break;
 #if defined(VOLUMETRIC_FOG_SHADOWS)
@@ -4658,16 +5301,14 @@ bool CHWShader_D3D::mfSetTextures(const std::vector<SCGTexture>& Textures, EHWSh
 			break;
 		case ECGT_WaterVolumeRefl:
 			{
-				const uint32 nCurrWaterVolID = gRenDev->GetFrameID(false) % 2;
-				CTexture* pTex = CTexture::s_ptexWaterVolumeRefl[nCurrWaterVolID] ? CTexture::s_ptexWaterVolumeRefl[nCurrWaterVolID] : CTexture::s_ptexBlack;
-				pTex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
+				CTexture* tex = CTexture::s_ptexWaterVolumeRefl[0];
+				tex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
 			}
 			break;
 		case ECGT_WaterVolumeReflPrev:
 			{
-				const uint32 nPrevWaterVolID = (gRenDev->GetFrameID(false) + 1) % 2;
-				CTexture* pTex = CTexture::s_ptexWaterVolumeRefl[nPrevWaterVolID] ? CTexture::s_ptexWaterVolumeRefl[nPrevWaterVolID] : CTexture::s_ptexBlack;
-				pTex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
+				CTexture* tex = CTexture::s_ptexWaterVolumeRefl[1];
+				tex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
 			}
 			break;
 		case ECGT_RainOcclusion:
@@ -4678,79 +5319,23 @@ bool CHWShader_D3D::mfSetTextures(const std::vector<SCGTexture>& Textures, EHWSh
 			break;
 		case ECGT_TerrainBaseMap:
 			{
-				int tex0 = 0, tex1 = 0, tex2 = 0;
-				ITerrain* const pTerrain = gEnv->p3DEngine->GetITerrain();
-				if (pTerrain)
-				{
-					pTerrain->GetAtlasTexId(tex0, tex1, tex2);
-					CTexture* const pTex = CTexture::GetByID(tex0);
-					pTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultViewSRGB);
-				}
-				else
-				{
-					CTexture* const pTex = CTexture::s_ptexBlack;
-					pTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultViewSRGB);
-				}
+				int nTex0 = 0, nTex1 = 0;
+				gEnv->p3DEngine->GetITerrain()->GetAtlasTexId(nTex0, nTex1);
+				CTexture* tex = CTexture::GetByID(nTex0);
+				tex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultViewSRGB);
 			}
 			break;
 		case ECGT_TerrainNormMap:
 			{
-				int tex0 = 0, tex1 = 0, tex2 = 0;
-				ITerrain* const pTerrain = gEnv->p3DEngine->GetITerrain();
-				if (pTerrain)
-				{
-					pTerrain->GetAtlasTexId(tex0, tex1, tex2);
-					CTexture* const pTex = CTexture::GetByID(tex1);
-					pTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultView);
-				}
-				else
-				{
-					CTexture* const pTex = CTexture::s_ptexBlack;
-					pTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultView);
-				}
-			}
-			break;
-		case ECGT_TerrainElevMap:
-			{
-				int tex0 = 0, tex1 = 0, tex2 = 0;
-				ITerrain* const pTerrain = gEnv->p3DEngine->GetITerrain();
-				if (pTerrain)
-				{
-					pTerrain->GetAtlasTexId(tex0, tex1, tex2);
-					CTexture* const pTex = CTexture::GetByID(tex2);
-					pTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultView);
-				}
-				else
-				{
-					CTexture* const pTex = CTexture::s_ptexBlack;
-					pTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultView);
-				}
+				int nTex0 = 0, nTex1 = 0;
+				gEnv->p3DEngine->GetITerrain()->GetAtlasTexId(nTex0, nTex1);
+				CTexture* tex = CTexture::GetByID(nTex1);
+				tex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultView);
 			}
 			break;
 		case ECGT_WindGrid:
 			{
 				CTexture* tex = CTexture::s_ptexWindGrid;
-				tex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
-			}
-			break;
-		case ECGT_CloudShadow:
-			{
-				const bool setupCloudShadows = rd->m_bShadowsEnabled && rd->m_bCloudShadowsEnabled;
-				CTexture* pCloudShadowTex = CTexture::s_ptexWhite;
-				if (setupCloudShadows)
-				{
-					// cloud shadow map
-					pCloudShadowTex =
-					  (rd->GetCloudShadowTextureId() > 0)
-					  ? CTexture::GetByID(rd->GetCloudShadowTextureId())
-					  : pCloudShadowTex;
-				}
-				pCloudShadowTex->ApplyTexture(nTUnit, eSHClass, SResourceView::DefaultView);
-			}
-			break;
-		case ECGT_VolCloudShadow:
-			{
-				CTexture* tex = CTexture::s_ptexVolCloudShadow;
 				tex->ApplyTexture(nTUnit, eSHClass, nResViewKey);
 			}
 			break;
@@ -4898,7 +5483,7 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 				case TO_FROMRE1_FROM_CONTAINER:
 					{
 						// take render element from vertex container render mesh if available
-						CRenderElement* pRE = sGetContainerRE0(rd->m_RP.m_pRE);
+						CRendElementBase* pRE = sGetContainerRE0(rd->m_RP.m_pRE);
 						if (pRE)
 							nCustomID = pRE->m_CustomTexBind[nCustomID - TO_FROMRE0_FROM_CONTAINER];
 						else
@@ -5048,8 +5633,8 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 							else if ((rd->m_RP.m_ObjFlags & FOB_BLEND_WITH_TERRAIN_COLOR) && (nCustomID < 0))
 							{
 								// terrain atlas texture id
-								int nTexID0, nTexID1, nTexID2;
-								gEnv->p3DEngine->GetITerrain()->GetAtlasTexId(nTexID0, nTexID1, nTexID2);
+								int nTexID0, nTexID1;
+								gEnv->p3DEngine->GetITerrain()->GetAtlasTexId(nTexID0, nTexID1);
 								pTex = CTexture::GetByID(nTexID0);
 							}
 						}
@@ -5079,8 +5664,6 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 						//assert(pEnvTex->m_pTex);
 						if (pEnvTex && pEnvTex->m_pTex)
 							pEnvTex->m_pTex->Apply(nTUnit, nTState);
-						else
-							CTexture::s_ptexBlack->Apply(nTUnit, nTState);
 					}
 					break;
 
@@ -5136,6 +5719,15 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 						else
 							CTexture::s_ptexFlatBump->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit, SResourceView::DefaultView, eSHClass);
 
+					}
+					break;
+
+				case TO_WATERRIPPLESMAP:
+					{
+						if (CTexture::s_ptexWaterRipplesDDN)
+							CTexture::s_ptexWaterRipplesDDN->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit, SResourceView::DefaultView, eSHClass);
+						else
+							CTexture::s_ptexWhite->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit, SResourceView::DefaultView, eSHClass);
 					}
 					break;
 
@@ -5212,6 +5804,52 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 					}
 					break;
 
+#if defined(INCLUDE_SCALEFORM_SDK) || defined(CRY_FEATURE_SCALEFORM_HELPER)
+				case TO_FROMSF0:
+				case TO_FROMSF1:
+				case TO_FROMSFY:
+				case TO_FROMSFU:
+				case TO_FROMSFV:
+				case TO_FROMSFA:
+					{
+						const SSF_GlobalDrawParams* pParams = rd->SF_GetGlobalDrawParams();
+						assert(pParams);
+						if (pParams)
+						{
+							int texIdx = nCustomID - TO_FROMSF0;
+							int texID = -1;
+
+							if (texIdx < 2)
+							{
+								texID = pParams->texture[texIdx].texID;
+							}
+							else
+							{
+								assert(texIdx < 6);
+								texID = pParams->texID_YUVA[texIdx - 2];
+								texIdx = 0;
+							}
+
+							if (texID > 0)
+							{
+								const static int texStateID[8] =
+								{
+									CTexture::GetTexState(STexState(FILTER_POINT,     false)), CTexture::GetTexState(STexState(FILTER_POINT,     true)),
+									CTexture::GetTexState(STexState(FILTER_LINEAR,    false)), CTexture::GetTexState(STexState(FILTER_LINEAR,    true)),
+									CTexture::GetTexState(STexState(FILTER_TRILINEAR, false)), CTexture::GetTexState(STexState(FILTER_TRILINEAR, true)),
+									-1,                                               -1
+								};
+								CTexture* pTex = CTexture::GetByID(texID);
+								int textStateID = texStateID[pParams->texture[texIdx].texState];
+								pTex->Apply(nTUnit, textStateID);
+								break;
+							}
+						}
+						CTexture::s_ptexWhite->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+						break;
+					}
+#endif
+
 				case TO_HDR_MEASURED_LUMINANCE:
 					{
 						CTexture::s_ptexHDRMeasuredLuminance[gRenDev->RT_GetCurrGpuID()]->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
@@ -5222,7 +5860,7 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 				case TO_VOLOBJ_SHADOW:
 					{
 						bool texBound(false);
-						CRenderElement* pRE(rd->m_RP.m_pRE);
+						CRendElementBase* pRE(rd->m_RP.m_pRE);
 						if (pRE && pRE->mfGetType() == eDATA_VolumeObject)
 						{
 							CREVolumeObject* pVolObj((CREVolumeObject*)pRE);
@@ -5277,7 +5915,7 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 				case TO_SKYDOME_MIE:
 				case TO_SKYDOME_RAYLEIGH:
 					{
-						CRenderElement* pRE = rd->m_RP.m_pRE;
+						CRendElementBase* pRE = rd->m_RP.m_pRE;
 						if (pRE && pRE->mfGetType() == eDATA_HDRSky)
 						{
 							CTexture* pTex = nCustomID == TO_SKYDOME_MIE ? ((CREHDRSky*) pRE)->m_pSkyDomeTextureMie : ((CREHDRSky*) pRE)->m_pSkyDomeTextureRayleigh;
@@ -5293,7 +5931,7 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 
 				case TO_SKYDOME_MOON:
 					{
-						CRenderElement* pRE = rd->m_RP.m_pRE;
+						CRendElementBase* pRE = rd->m_RP.m_pRE;
 						if (pRE && pRE->mfGetType() == eDATA_HDRSky)
 						{
 							CREHDRSky* pHDRSky = (CREHDRSky*) pRE;
@@ -5315,7 +5953,7 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 						const bool enabled = gRenDev->m_bVolFogShadowsEnabled;
 						assert(enabled);
 						CTexture* pTex = enabled ? CTexture::s_ptexVolFogShadowBuf[0] : CTexture::s_ptexWhite;
-						pTex->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit, SResourceView::DefaultView, eSHClass);
+						pTex->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
 						break;
 #else
 						assert(0);
@@ -5323,6 +5961,30 @@ bool CHWShader_D3D::mfSetSamplers_Old(const std::vector<STexSamplerRT>& Samplers
 #endif
 					}
 
+				case TO_LPV_R:
+					if (CTexture::s_ptexLPV_RTs[0])
+						CTexture::s_ptexLPV_RTs[0]->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+					break;
+				case TO_LPV_G:
+					if (CTexture::s_ptexLPV_RTs[1])
+						CTexture::s_ptexLPV_RTs[1]->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+					break;
+				case TO_LPV_B:
+					if (CTexture::s_ptexLPV_RTs[2])
+						CTexture::s_ptexLPV_RTs[2]->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+					break;
+				case TO_RSM_NORMAL:
+					if (CTexture::s_ptexRSMNormals)
+						CTexture::s_ptexRSMNormals->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+					break;
+				case TO_RSM_COLOR:
+					if (CTexture::s_ptexRSMFlux)
+						CTexture::s_ptexRSMFlux->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+					break;
+				case TO_RSM_DEPTH:
+					if (CTexture::s_ptexRSMDepth)
+						CTexture::s_ptexRSMDepth->Apply(nTUnit, nTState, nTexMaterialSlot, nSUnit);
+					break;
 				default:
 					{
 #if defined(FEATURE_SVO_GI)
@@ -5414,7 +6076,7 @@ ED3DShError CHWShader_D3D::mfFallBack(SHWSInstance*& pInst, int nStatus)
 	}
 	if (
 	  m_eSHClass == eHWSC_Geometry || m_eSHClass == eHWSC_Domain || m_eSHClass == eHWSC_Hull ||
-	  (gRenDev->m_RP.m_nBatchFilter & FB_Z) || gRenDev->m_RP.m_nPassGroupID == EFSLIST_SHADOW_PASS)
+	  (gRenDev->m_RP.m_nBatchFilter & FB_Z) || (gRenDev->m_RP.m_TI[gRenDev->m_RP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN) || gRenDev->m_RP.m_nPassGroupID == EFSLIST_SHADOW_PASS)
 		return ED3DShError_CompilingError;
 	if (gRenDev->m_RP.m_pShader)
 	{
@@ -5477,7 +6139,7 @@ ED3DShError CHWShader_D3D::mfFallBack(SHWSInstance*& pInst, int nStatus)
 		if (!pHWSH->m_Insts.size())
 		{
 			SShaderCombination cmb;
-			pHWSH->mfPrecache(cmb, true, true, gRenDev->m_RP.m_pShader, gRenDev->m_RP.m_pShaderResources);
+			pHWSH->mfPrecache(cmb, true, true, false, gRenDev->m_RP.m_pShader, gRenDev->m_RP.m_pShaderResources);
 		}
 		if (pHWSH->m_Insts.size())
 		{
@@ -5521,7 +6183,7 @@ ED3DShError CHWShader_D3D::mfIsValid_Int(SHWSInstance*& pInst, bool bFinalise)
 			nStatus = mfAsyncCompileReady(pInst);
 			if (nStatus == 1)
 			{
-				if (gcpRendD3D->m_cEF.m_nCombinationsProcess <= 0)
+				if (gcpRendD3D->m_cEF.m_nCombinationsProcess <= 0 || gcpRendD3D->m_cEF.m_bActivatePhase)
 				{
 					assert(pInst->m_Handle.m_pShader != NULL);
 				}
@@ -5661,10 +6323,37 @@ struct InstContainerByHash
 	}
 };
 
-CHWShader_D3D::SHWSInstance* CHWShader_D3D::mfGetHashInst(InstContainer* pInstCont, uint32 identHash, SShaderCombIdent& Ident, InstContainerIt& it)
+CHWShader_D3D::SHWSInstance* CHWShader_D3D::mfGetInstance(CShader* pSH, int nHashInstance, uint64 GLMask)
 {
-	SHWSInstance* pInst = NULL;
-	it = std::lower_bound(pInstCont->begin(), pInstCont->end(), identHash, InstContainerByHash());
+	DETAILED_PROFILE_MARKER("mfGetInstance");
+	FUNCTION_PROFILER_RENDER_FLAT
+	InstContainer* pInstCont = &m_Insts;
+	InstContainerIt it = std::lower_bound(pInstCont->begin(), pInstCont->end(), nHashInstance, InstContainerByHash());
+	assert(it != pInstCont->end() && nHashInstance == (*it)->m_Ident.m_nHash);
+
+	return (*it);
+}
+
+CHWShader_D3D::SHWSInstance* CHWShader_D3D::mfGetInstance(CShader* pSH, SShaderCombIdent& Ident, uint32 nFlags)
+{
+	DETAILED_PROFILE_MARKER("mfGetInstance");
+	FUNCTION_PROFILER_RENDER_FLAT
+	SHWSInstance* pInst = m_pCurInst;
+	if (pInst && !pInst->m_bFallback)
+	{
+		assert(pInst->m_eClass < eHWSC_Num);
+
+		const SShaderCombIdent& other = pInst->m_Ident;
+		// other will have been through PostCreate, and so won't have the platform mask set anymore
+		if ((Ident.m_MDVMask & ~SF_PLATFORM) == other.m_MDVMask && Ident.m_RTMask == other.m_RTMask && Ident.m_GLMask == other.m_GLMask && Ident.m_FastCompare1 == other.m_FastCompare1 && Ident.m_pipelineState.opaque == other.m_pipelineState.opaque)
+			return pInst;
+	}
+	InstContainer* pInstCont = &m_Insts;
+	pInst = 0;
+
+	uint32 identHash = Ident.PostCreate();
+
+	InstContainerIt it = std::lower_bound(pInstCont->begin(), pInstCont->end(), identHash, InstContainerByHash());
 	InstContainerIt itOther = it;
 	while (it != pInstCont->end() && identHash == (*it)->m_Ident.m_nHash)
 	{
@@ -5693,41 +6382,6 @@ CHWShader_D3D::SHWSInstance* CHWShader_D3D::mfGetHashInst(InstContainer* pInstCo
 			--itOther;
 		}
 	}
-	return pInst;
-}
-
-CHWShader_D3D::SHWSInstance* CHWShader_D3D::mfGetInstance(CShader* pSH, int nHashInstance, SShaderCombIdent& Ident)
-{
-	DETAILED_PROFILE_MARKER("mfGetInstance");
-	FUNCTION_PROFILER_RENDER_FLAT
-	InstContainer* pInstCont = &m_Insts;
-
-	InstContainerIt it;
-	SHWSInstance* pInst = mfGetHashInst(pInstCont, nHashInstance, Ident, it);
-
-	return pInst;
-}
-
-CHWShader_D3D::SHWSInstance* CHWShader_D3D::mfGetInstance(CShader* pSH, SShaderCombIdent& Ident, uint32 nFlags)
-{
-	DETAILED_PROFILE_MARKER("mfGetInstance");
-	FUNCTION_PROFILER_RENDER_FLAT
-	SHWSInstance* pInst = m_pCurInst;
-	if (pInst && !pInst->m_bFallback)
-	{
-		assert(pInst->m_eClass < eHWSC_Num);
-
-		const SShaderCombIdent& other = pInst->m_Ident;
-		// other will have been through PostCreate, and so won't have the platform mask set anymore
-		if ((Ident.m_MDVMask & ~SF_PLATFORM) == other.m_MDVMask && Ident.m_RTMask == other.m_RTMask && Ident.m_GLMask == other.m_GLMask && Ident.m_FastCompare1 == other.m_FastCompare1 && Ident.m_pipelineState.opaque == other.m_pipelineState.opaque)
-			return pInst;
-	}
-	InstContainer* pInstCont = &m_Insts;
-
-	uint32 identHash = Ident.PostCreate();
-
-	InstContainerIt it;
-	pInst = mfGetHashInst(pInstCont, identHash, Ident, it);
 
 	if (pInst == 0)
 	{
@@ -5793,7 +6447,6 @@ bool CHWShader_D3D::mfSetVS(int nFlags)
 	Ident.m_MDMask = rRP.m_FlagsShader_MD;
 	Ident.m_MDVMask = rRP.m_FlagsShader_MDV | CParserBin::m_nPlatform;
 	Ident.m_GLMask = m_nMaskGenShader;
-	Ident.m_pipelineState.opaque = gRenDev->m_RP.m_FlagsShader_PipelineState;
 	/*if (RTMask == 0x40004 && !stricmp(m_EntryFunc.c_str(), "Common_ZPassVS"))
 	   {
 	   int nnn = 0;
@@ -5814,7 +6467,6 @@ bool CHWShader_D3D::mfSetVS(int nFlags)
 	if (!mfCheckActivation(rRP.m_pShader, pInst, nFlags))
 	{
 		s_pCurInstVS = NULL;
-		s_pCurHWVS = NULL;
 		s_nActivationFailMask |= (1 << eHWSC_Vertex);
 		return false;
 	}
@@ -5859,7 +6511,6 @@ bool CHWShader_D3D::mfSetVS(int nFlags)
 #endif
 			mfBind();
 		}
-		s_pCurHWVS = this;
 		s_pCurInstVS = pInst;
 		rRP.m_FlagsStreams_Decl = pInst->m_VStreamMask_Decl;
 		rRP.m_FlagsStreams_Stream = pInst->m_VStreamMask_Stream;
@@ -5894,7 +6545,6 @@ bool CHWShader_D3D::mfSetPS(int nFlags)
 	Ident.m_MDMask = rRP.m_FlagsShader_MD & ~HWMD_TEXCOORD_FLAG_MASK;
 	Ident.m_MDVMask = CParserBin::m_nPlatform;
 	Ident.m_GLMask = m_nMaskGenShader;
-	Ident.m_pipelineState.opaque = gRenDev->m_RP.m_FlagsShader_PipelineState;
 
 	ModifyLTMask(Ident.m_LightMask);
 
@@ -5988,12 +6638,6 @@ bool CHWShader_D3D::mfSetGS(int nFlags)
 	DETAILED_PROFILE_MARKER("mfSetGS");
 
 	CD3D9Renderer* rd = gcpRendD3D;
-	if (m_Flags & HWSG_GS_MULTIRES)
-	{
-		if (!s_pCurInstVS || !CVrProjectionManager::IsMultiResEnabledStatic())
-			return false;
-	}
-
 	SRenderPipeline& RESTRICT_REFERENCE rRP = rd->m_RP;
 	SThreadInfo& RESTRICT_REFERENCE rTI = rRP.m_TI[rRP.m_nProcessThreadID];
 
@@ -6003,7 +6647,6 @@ bool CHWShader_D3D::mfSetGS(int nFlags)
 	Ident.m_MDMask = rRP.m_FlagsShader_MD;
 	Ident.m_MDVMask = rRP.m_FlagsShader_MDV | CParserBin::m_nPlatform;
 	Ident.m_GLMask = m_nMaskGenShader;
-	Ident.m_pipelineState.opaque = gRenDev->m_RP.m_FlagsShader_PipelineState;
 
 	ModifyLTMask(Ident.m_LightMask);
 
@@ -6059,7 +6702,6 @@ bool CHWShader_D3D::mfSetHS(int nFlags)
 	Ident.m_MDMask = rRP.m_FlagsShader_MD;
 	Ident.m_MDVMask = rRP.m_FlagsShader_MDV | CParserBin::m_nPlatform;
 	Ident.m_GLMask = m_nMaskGenShader;
-	Ident.m_pipelineState.opaque = gRenDev->m_RP.m_FlagsShader_PipelineState;
 
 	ModifyLTMask(Ident.m_LightMask);
 
@@ -6104,9 +6746,6 @@ bool CHWShader_D3D::mfSetHS(int nFlags)
 		mfSetParametersPB();
 	}
 
-	if (nFlags & HWSF_SETTEXTURES)
-		mfSetSamplers(pInst->m_pSamplers, m_eSHClass);
-
 	s_nActivationFailMask &= ~(1 << eHWSC_Hull);
 
 	return true;
@@ -6126,7 +6765,6 @@ bool CHWShader_D3D::mfSetDS(int nFlags)
 	Ident.m_MDMask = rRP.m_FlagsShader_MD;
 	Ident.m_MDVMask = rRP.m_FlagsShader_MDV | CParserBin::m_nPlatform;
 	Ident.m_GLMask = m_nMaskGenShader;
-	Ident.m_pipelineState.opaque = gRenDev->m_RP.m_FlagsShader_PipelineState;
 
 	ModifyLTMask(Ident.m_LightMask);
 
@@ -6193,7 +6831,6 @@ bool CHWShader_D3D::mfSetCS(int nFlags)
 	Ident.m_MDMask = rRP.m_FlagsShader_MD;
 	Ident.m_MDVMask = rRP.m_FlagsShader_MDV | CParserBin::m_nPlatform;
 	Ident.m_GLMask = m_nMaskGenShader;
-	Ident.m_pipelineState.opaque = gRenDev->m_RP.m_FlagsShader_PipelineState;
 
 	ModifyLTMask(Ident.m_LightMask);
 
@@ -6254,7 +6891,7 @@ void CHWShader_D3D::mfSetCM()
 	}
 }
 
-void CHWShader_D3D::mfSetPV(const D3DViewPort* pCustomViewport)
+void CHWShader_D3D::mfSetPV(const RECT* pCustomViewport)
 {
 	CD3D9Renderer* const __restrict rd = gcpRendD3D;
 	SRenderPipeline& RESTRICT_REFERENCE rRP = rd->m_RP;
@@ -6265,18 +6902,65 @@ void CHWShader_D3D::mfSetPV(const D3DViewPort* pCustomViewport)
 	CConstantBuffer* pBuffer = pPerViewCB ? pPerViewCB.get() : NULL;
 	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_VS, pBuffer, 13);
 	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_PS, pBuffer, 13);
-#if !defined(OPENGL) || DXGL_ENABLE_GEOMETRY_SHADERS
 	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_GS, pBuffer, 13);
-#endif
-
-#if !defined(OPENGL) || DXGL_ENABLE_TESSELLATION_SHADERS
 	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_HS, pBuffer, 13);
 	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_DS, pBuffer, 13);
+	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_CS, pBuffer, 13);
+}
+
+void CHWShader_D3D::mfSetPF()
+{
+	DETAILED_PROFILE_MARKER("mfSetPF");
+	CD3D9Renderer* r = gcpRendD3D;
+
+	for (EHWShaderClass eClass = eHWSC_Vertex; eClass < eHWSC_Num; eClass = EHWShaderClass(eClass + 1))
+	{
+		if (!s_PF_Params[eClass].empty())
+		{
+			mfSetParameters(&s_PF_Params[eClass][0], s_PF_Params[eClass].size(), eClass, s_nMax_PF_Vecs[eClass]);
+		}
+	}
+}
+
+void CHWShader_D3D::mfSetSG()
+{
+	DETAILED_PROFILE_MARKER("mfSetSG");
+	CD3D9Renderer* r = gcpRendD3D;
+
+	if (r->m_RP.m_TI[gRenDev->m_RP.m_nProcessThreadID].m_PersFlags & RBPF_SHADOWGEN)
+	{
+		assert(r->m_RP.m_ShadowInfo.m_pCurShadowFrustum);
+		if (ShadowMapFrustum* pFrustum = r->m_RP.m_ShadowInfo.m_pCurShadowFrustum)
+		{
+			const int vectorCount = sizeof(HLSL_PerPassConstantBuffer_ShadowGen) / sizeof(Vec4);
+			CConstantBuffer*& pCB = s_pCB[eHWSC_Vertex][CB_PER_SHADOWGEN][vectorCount];
+
+			if (!pCB)
+			{
+				pCB = gcpRendD3D->m_DevBufMan.CreateConstantBuffer(vectorCount * sizeof(Vec4));
+			}
+
+			CTypedConstantBuffer<HLSL_PerPassConstantBuffer_ShadowGen> cb(pCB);
+			cb->CP_ShadowGen_FrustrumInfo = r->m_RP.m_TI[r->m_RP.m_nProcessThreadID].m_vFrustumInfo;
+			cb->CP_ShadowGen_LightPos = Vec4(pFrustum->vLightSrcRelPos + pFrustum->vProjTranslation, 0);
+			cb->CP_ShadowGen_ViewPos = Vec4(r->m_RP.m_ShadowInfo.vViewerPos, 0);
+			cb->CP_ShadowGen_DepthTestBias = r->m_cEF.m_TempVecs[1];
+
+			cb->CP_ShadowGen_VegetationAlphaClamp = Vec4(ZERO);
+#if defined(FEATURE_SVO_GI)
+			if (CSvoRenderer* pSvoRenderer = CSvoRenderer::GetInstance())
+			{
+				cb->CP_ShadowGen_VegetationAlphaClamp.x = pSvoRenderer->GetVegetationMaxOpacity();
+			}
 #endif
 
-#if !defined(OPENGL) || DXGL_ENABLE_COMPUTE_SHADERS
-	rd->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_CS, pBuffer, 13);
-#endif
+			cb.CopyToDevice();
+
+			r->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_VS, cb.GetDeviceConstantBuffer(), CB_PER_SHADOWGEN);
+			r->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_HS, cb.GetDeviceConstantBuffer(), CB_PER_SHADOWGEN);
+			r->m_DevMan.BindConstantBuffer(CDeviceManager::TYPE_DS, cb.GetDeviceConstantBuffer(), CB_PER_SHADOWGEN);
+		}
+	}
 }
 
 void CHWShader_D3D::mfSetGlobalParams()
@@ -6338,7 +7022,7 @@ void CHWShader_D3D::mfSetGlobalParams()
 		}
 	}
 
-	r->m_RP.m_PersFlags2 |= RBPF2_COMMIT_PF | RBPF2_COMMIT_CM;
+	r->m_RP.m_PersFlags2 |= RBPF2_COMMIT_PF | RBPF2_COMMIT_CM | RBPF2_COMMIT_SG;
 	r->m_RP.m_nCommitFlags |= FC_GLOBAL_PARAMS;
 }
 
@@ -6351,6 +7035,92 @@ void CHWShader_D3D::mfSetCameraParams()
 #endif
 	gRenDev->m_RP.m_PersFlags2 |= RBPF2_COMMIT_PF | RBPF2_COMMIT_CM;
 	gRenDev->m_RP.m_nCommitFlags |= FC_GLOBAL_PARAMS;
+}
+
+bool CHWShader_D3D::mfAddGlobalParameter(SCGParam& Param, EHWShaderClass eSH, bool bSG, bool bCam)
+{
+	uint32 i;
+	DETAILED_PROFILE_MARKER("mfAddGlobalParameter");
+	if (bCam)
+	{
+		for (i = 0; i < s_CM_Params[eSH].size(); i++)
+		{
+			SCGParam* pP = &s_CM_Params[eSH][i];
+			if (pP->m_Name == Param.m_Name)
+				break;
+		}
+		if (i == s_CM_Params[eSH].size())
+		{
+			s_CM_Params[eSH].push_back(Param);
+			if ((Param.m_dwBind + Param.m_nParameters) > s_nMax_PF_Vecs[eSH])
+			{
+				gRenDev->m_RP.m_PersFlags2 |= RBPF2_COMMIT_CM;
+				gRenDev->m_RP.m_nCommitFlags |= FC_GLOBAL_PARAMS;
+			}
+			s_nMax_PF_Vecs[eSH] = max(Param.m_dwBind + Param.m_nParameters, s_nMax_PF_Vecs[eSH]);
+			return true;
+		}
+	}
+	else if (!bSG)
+	{
+		for (i = 0; i < s_PF_Params[eSH].size(); i++)
+		{
+			SCGParam* pP = &s_PF_Params[eSH][i];
+			if (pP->m_Name == Param.m_Name)
+				break;
+		}
+		if (i == s_PF_Params[eSH].size())
+		{
+			if (eSH == eHWSC_Pixel)
+			{
+				if (strnicmp(Param.m_Name.c_str(), "g_PS", 4))
+				{
+					assert(false);
+					iLog->Log("Error: Attempt to use non-PS global parameter in pixel shader");
+					return false;
+				}
+			}
+			else if (eSH == eHWSC_Vertex)
+			{
+				if (strnicmp(Param.m_Name.c_str(), "g_VS", 4))
+				{
+					assert(false);
+					iLog->Log("Error: Attempt to use non-VS global parameter in vertex shader");
+					return false;
+				}
+			}
+			assert(eSH < eHWSC_Num);
+			s_PF_Params[eSH].push_back(Param);
+			if ((Param.m_dwBind + Param.m_nParameters) > s_nMax_PF_Vecs[eSH])
+			{
+				gRenDev->m_RP.m_PersFlags2 |= RBPF2_COMMIT_PF;
+				gRenDev->m_RP.m_nCommitFlags |= FC_GLOBAL_PARAMS;
+			}
+			s_nMax_PF_Vecs[eSH] = max(Param.m_dwBind + Param.m_nParameters, s_nMax_PF_Vecs[eSH]);
+			return true;
+		}
+	}
+	else
+	{
+		for (i = 0; i < s_SG_Params[eSH].size(); i++)
+		{
+			SCGParam* pP = &s_SG_Params[eSH][i];
+			if (pP->m_Name == Param.m_Name)
+				break;
+		}
+		if (i == s_SG_Params[eSH].size())
+		{
+			s_SG_Params[eSH].push_back(Param);
+			if ((Param.m_dwBind + Param.m_nParameters) > s_nMax_SG_Vecs[eSH])
+			{
+				gRenDev->m_RP.m_PersFlags2 |= RBPF2_COMMIT_SG;
+				gRenDev->m_RP.m_nCommitFlags |= FC_GLOBAL_PARAMS;
+			}
+			s_nMax_SG_Vecs[eSH] = max(Param.m_dwBind + Param.m_nParameters, s_nMax_SG_Vecs[eSH]);
+			return true;
+		}
+	}
+	return false;
 }
 
 bool CHWShader_D3D::mfAddGlobalTexture(SCGTexture& Texture)
@@ -6471,4 +7241,38 @@ Vec4 CHWShader_D3D::GetFogColorGradientRadial()
 {
 	DETAILED_PROFILE_MARKER("GetFogColorGradientRadial");
 	return sGetFogColorGradientRadial(gcpRendD3D);
+}
+
+Vec4 SBending::GetShaderConstants(float realTime) const
+{
+	Vec4 result(ZERO);
+	if ((m_vBending.x * m_vBending.x + m_vBending.y * m_vBending.y) > 0.0f)
+	{
+		const Vec2& vBending = m_vBending;
+		Vec2 vAddBending(ZERO);
+
+		if (m_Waves[0].m_Amp)
+		{
+			// Fast version of CShaderMan::EvalWaveForm (for bending)
+			const SWaveForm2& RESTRICT_REFERENCE wave0 = m_Waves[0];
+			const SWaveForm2& RESTRICT_REFERENCE wave1 = m_Waves[1];
+			const float* const __restrict pSinTable = gcpRendD3D->m_RP.m_tSinTable;
+
+			int val0 = (int)((realTime * wave0.m_Freq + wave0.m_Phase) * (float)SRenderPipeline::sSinTableCount);
+			int val1 = (int)((realTime * wave1.m_Freq + wave1.m_Phase) * (float)SRenderPipeline::sSinTableCount);
+
+			float sinVal0 = pSinTable[val0 & (SRenderPipeline::sSinTableCount - 1)];
+			float sinVal1 = pSinTable[val1 & (SRenderPipeline::sSinTableCount - 1)];
+			vAddBending.x = wave0.m_Amp * sinVal0 + wave0.m_Level;
+			vAddBending.y = wave1.m_Amp * sinVal1 + wave1.m_Level;
+		}
+
+		result.x = vAddBending.x * 50.f + vBending.x;
+		result.y = vAddBending.y * 50.f + vBending.y;
+		result.z = vBending.GetLength() * 2.f;
+		result *= m_fMainBendingScale;
+		result.w = (vAddBending + vBending).GetLength() * 0.3f;
+	}
+
+	return result;
 }

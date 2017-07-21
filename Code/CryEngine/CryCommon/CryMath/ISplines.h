@@ -89,6 +89,8 @@ template<class T> void Zero(T& val) { ZeroStruct(val); }
 **                            Key classes																	 **
 ****************************************************************************/
 SERIALIZATION_ENUM_DECLARE(ETangentType, : uint8,
+                           //	_Smooth,				// Legacy name
+                           //	Auto = _Smooth,
                            Smooth,
                            Custom,
                            Zero,
@@ -103,7 +105,7 @@ struct Flags          //!< Tangent flags.
 	bool         tangentsUnified;
 	uint8        selectedMask;
 
-	//! Convert bitfields to/and from flag int, for code and serialization compatibility
+	//!< Convert bitfields to/and from flag int, for code and serialization compatibility
 	Flags(int i = 0)
 	{
 		inTangentType = ETangentType((i & SPLINE_KEY_TANGENT_IN_MASK) >> SPLINE_KEY_TANGENT_IN_SHIFT);
@@ -151,52 +153,8 @@ struct  SplineKey
 
 	static int tangent_passes() { return 1; }
 
-	// Compute the in and out tangents if needed. 
-	// Default implementation changes tangents only when flags = Zero, Step, or Linear.
-	void compute_tangents(const SplineKey* prev = nullptr, const SplineKey* next = nullptr, int pass = 0, int num_keys = 0)
-	{
-		if (pass == 0)
-		{
-			// Set initial tangents based on flags
-			if (!prev)
-			{
-				Zero(ds);
-				flags.inTangentType = ETangentType::Smooth;
-			}
-			else
-			{
-				switch (flags.inTangentType)
-				{
-				case ETangentType::Step:
-				case ETangentType::Zero:
-					Zero(ds);
-					break;
-				case ETangentType::Linear:
-					ds = value - prev->value;
-					break;
-				}
-			}
-
-			if (!next)
-			{
-				Zero(dd);
-				flags.outTangentType = ETangentType::Smooth;
-			}
-			else
-			{
-				switch (flags.outTangentType)
-				{
-				case ETangentType::Step:
-				case ETangentType::Zero:
-					Zero(dd);
-					break;
-				case ETangentType::Linear:
-					dd = next->value - value;
-					break;
-				}
-			}
-		}
-	}
+	// Need to implement:
+	void compute_tangents(const SplineKey* prev = NULL, const SplineKey* next = NULL, int pass = 0, int num_keys = 0) {}
 };
 
 // Serialization separators
@@ -438,7 +396,7 @@ public:
 	ILINE value_type&       value(int n)                   { return m_keys[n].value; }; //!< Shortcut to key n value.
 	ILINE value_type&       ds(int n)                      { return m_keys[n].ds; };    //!< Shortcut to key n incoming tangent.
 	ILINE value_type&       dd(int n)                      { return m_keys[n].dd; };    //!< Shortcut to key n outgoing tangent.
-	ILINE Flags&            flags(int n)                   { return m_keys[n].flags; }; //!< Shortcut to key n flags.
+	ILINE int&              flags(int n)                   { return m_keys[n].flags; }; //!< Shortcut to key n flags.
 
 	ILINE key_type const&   key(int n) const               { return m_keys[n]; };       //!< Return n key.
 	ILINE float             time(int n) const              { return m_keys[n].time; };  //!< Shortcut to key n time.
@@ -473,7 +431,7 @@ public:
 		{
 			for (int i = 0; i < num_keys(); ++i)
 			{
-				const key_type* prev = nullptr;
+				const key_type* prev = NULL;
 				if (i > 0)
 					prev = &m_keys[i - 1];
 				else if (closed())
@@ -483,7 +441,7 @@ public:
 					first.time -= m_rangeEnd - m_rangeStart;
 				}
 
-				const key_type* next = nullptr;
+				const key_type* next = NULL;
 				if (i < num_keys() - 1)
 					next = &m_keys[i + 1];
 				else if (closed())
@@ -493,7 +451,49 @@ public:
 					last.time += m_rangeEnd - m_rangeStart;
 				}
 
-				m_keys[i].compute_tangents(prev, next, pass, num_keys());
+				key_type& key = m_keys[i];
+
+				if (pass == 0)
+				{
+					// Set initial tangents based on flags
+					if (!prev)
+					{
+						Zero(key.ds);
+						// key.flags.inTangentType = ETangentType::Auto;
+						key.flags.inTangentType = ETangentType::Smooth;
+					}
+					else
+						switch (key.flags.inTangentType)
+						{
+						case ETangentType::Step:
+						case ETangentType::Zero:
+							Zero(key.ds);
+							break;
+						case ETangentType::Linear:
+							key.ds = key.value - prev->value;
+							break;
+						}
+
+					if (!next)
+					{
+						Zero(key.dd);
+						// key.flags.outTangentType = ETangentType::Auto;
+						key.flags.inTangentType = ETangentType::Smooth;
+					}
+					else
+						switch (key.flags.outTangentType)
+						{
+						case ETangentType::Step:
+						case ETangentType::Zero:
+							Zero(key.dd);
+							break;
+						case ETangentType::Linear:
+							key.dd = next->value - key.value;
+							break;
+						}
+				}
+
+				key.compute_tangents(prev, next, pass, num_keys());
 			}
 		}
 	}
@@ -751,6 +751,7 @@ struct BezierKey : public SplineKey<T>
 			{
 				switch (this->flags.outTangentType)
 				{
+				// case ETangentType::Auto:
 				case ETangentType::Smooth:
 				case ETangentType::Linear:
 					this->dd = oneThird * (next->value - this->value);
@@ -760,6 +761,7 @@ struct BezierKey : public SplineKey<T>
 			{
 				switch (this->flags.inTangentType)
 				{
+				// case ETangentType::Auto:
 				case ETangentType::Smooth:
 				case ETangentType::Linear:
 					this->ds = oneThird * (this->value - prev->value);
@@ -888,8 +890,8 @@ public:
 	// ISplineEvaluator
 	virtual int GetNumDimensions() const
 	{
-		static_assert(sizeof(value_type) % sizeof(ElemType) == 0, "Invalid type sizes!");
-		static_assert(DIM > 0 && DIM <= 4, "Invalid dimension count!");
+		COMPILE_TIME_ASSERT(sizeof(value_type) % sizeof(ElemType) == 0);
+		COMPILE_TIME_ASSERT(DIM > 0 && DIM <= 4);
 		return DIM;
 	}
 	virtual int GetKeyCount() const

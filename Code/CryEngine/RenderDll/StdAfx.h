@@ -40,8 +40,6 @@ bool        CheckHResult(long const hr, bool breakOnError, const char* file, con
 // stores pointers to actual backing storage of vertex buffers. Can only be used on architectures
 // that have a unified memory architecture and further guarantee that buffer storage does not change
 // on repeated accesses.
-// NOTE: DX12 doesn't support non-direct buffer access, because the otherwise used MAP_DISCARD
-// implementation doesn't track if to-be-discarded resources have open views, this is a design decision
 #if (CRY_PLATFORM_CONSOLE || defined(CRY_USE_DX12))
 	#define BUFFER_ENABLE_DIRECT_ACCESS 1
 #endif
@@ -85,7 +83,7 @@ bool        CheckHResult(long const hr, bool breakOnError, const char* file, con
 	#define DEVICE_SUPPORTS_D3D11_1
 #endif
 
-#if CRY_PLATFORM_DURANGO && !defined(CRY_USE_DX12)
+#if CRY_PLATFORM_DURANGO
 	#define DEVICE_SUPPORTS_PERFORMANCE_DEVICE
 #endif
 
@@ -114,23 +112,6 @@ bool        CheckHResult(long const hr, bool breakOnError, const char* file, con
 #ifdef ENABLE_FRAME_PROFILER
 	#define PROFILE 1
 #endif
-
-#define FUNCTION_PROFILER_RENDERER FUNCTION_PROFILER(iSystem, PROFILE_RENDERER)
-
-#define SCOPED_RENDERER_ALLOCATION_NAME_HINT(str)
-
-#define SHADER_ASYNC_COMPILATION
-
-#if !defined(_RELEASE)
-//# define DETAILED_PROFILING_MARKERS
-#endif
-#if defined(DETAILED_PROFILING_MARKERS)
-	#define DETAILED_PROFILE_MARKER(x) DETAILED_PROFILE_MARKER((x))
-#else
-	#define DETAILED_PROFILE_MARKER(x) (void)0
-#endif
-
-#define RAIN_OCC_MAP_SIZE 256
 
 #if CRY_PLATFORM_ORBIS
 	#define USE_SCUE
@@ -164,8 +145,8 @@ enum EVerifyType
 #if CRY_PLATFORM_SSE2 && CRY_COMPILER_MSVC
 	#include <fvec.h>
 	#include <CryCore/Assert/CryAssert.h> // to restore assert macro which was changed by <fvec.h>
-	#define CONST_INT32_PS(N, V3, V2, V1, V0)                                   \
-	  const _MM_ALIGN16 int _ ## N[] = { V0, V1, V2, V3 };   /*little endian!*/ \
+	#define CONST_INT32_PS(N, V3, V2, V1, V0)                                     \
+	  const _MM_ALIGN16 int _ ## N[] = { V0, V1, V2, V3 };     /*little endian!*/ \
 	  const F32vec4 N = _mm_load_ps((float*)_ ## N);
 #endif
 
@@ -215,13 +196,6 @@ enum EVerifyType
 // nv API
 #if CRY_PLATFORM_WINDOWS && !defined(EXCLUDE_NV_API) && !defined(OPENGL) && !defined(CRY_USE_DX12)
 	#define USE_NV_API 1
-	#define NV_API_HEADER "NVIDIA/NVAPI_r386/nvapi.h"
-
-	#if CRY_PLATFORM_64BIT
-		#define NV_API_LIB "SDKs/NVIDIA/NVAPI_r386/amd64/nvapi64.lib"
-	#else
-		#define NV_API_LIB "SDKs/NVIDIA/NVAPI_r386/x86/nvapi.lib"
-	#endif
 #endif
 
 // AMD EXT
@@ -229,9 +203,6 @@ enum EVerifyType
 	#define USE_AMD_EXT 1
 #endif
 
-// SF implementation enabled
-#define RENDERER_SUPPORT_SCALEFORM 1
- 
 // windows desktop API available for usage
 #if CRY_PLATFORM_WINDOWS
 	#define WINDOWS_DESKTOP_API
@@ -245,36 +216,22 @@ enum EVerifyType
 	#define USE_PIX_DURANGO
 #endif
 
-#if defined(CRY_USE_DX12)
-	#define CRY_USE_DX12_DEVIRTUALIZED
-#endif
-
 #if defined(DEVICE_SUPPORTS_D3D11_1) && !defined(CRY_PLATFORM_ORBIS)
 	#include <CryCore/Platform/CryWindows.h>
 	#ifdef CRY_PLATFORM_DURANGO
-		#include <d3d11_x.h>
-		#include "DX12\Includes\d3d11_empty.h"
-		#if BUFFER_USE_STAGED_UPDATES == 0
-		namespace detail
-		{
-			template<typename T> void safe_release(T*& ptr) { SAFE_RELEASE(ptr); }
-			template<> void safe_release<ID3D11Buffer>(ID3D11Buffer*& ptr);
-		}
-
-		// Call custom release-code for ID3D11Buffer on Durango by replacing SAFE_RELEASE()
-		#undef SAFE_RELEASE
-		#define SAFE_RELEASE(x) do { detail::safe_release((x)); } while (false)
-		#endif
+		#include "D3D11_x.h"
 	#else
 		#include "D3D11_1.h"
 	#endif
-
-	#if defined(CRY_USE_DX12_DEVIRTUALIZED) //including system headers before redefining D3D interfaces
-		#include "DX12\Includes\d3d11_empty.h"
-	#endif
 #endif
 
-//////////////////////////////////////////////////////////////////////////
+#define MAX_FRAME_LATENCY    1
+#define MAX_FRAMES_IN_FLIGHT (MAX_FRAME_LATENCY + 1)    // Current and Last
+
+// all D3D10 blob related functions and struct will be deprecated in next DirectX APIs
+// and replaced with regular D3DBlob counterparts
+#define D3D10CreateBlob D3DCreateBlob
+
 #if defined(CRY_USE_GNM_RENDERER)
 	#include "XRenderD3D9/GNM/GnmBase.hpp"
 #elif defined(CRY_USE_GNM)
@@ -286,9 +243,14 @@ enum EVerifyType
 	#include <CryCore/Platform/CryWindows.h>
 	#include "XRenderD3D9/DXGL/CryDXGL.hpp"
 	#if CRY_PLATFORM_WINDOWS
-		typedef uintptr_t SOCKET;   // ../Common/Shaders/RemoteCompiler.h
+typedef uintptr_t SOCKET;   // ../Common/Shaders/RemoteCompiler.h
 	#endif
-#elif !defined(CRY_USE_DX12)
+#elif defined(CRY_USE_DX12)
+	#include <CryCore/Platform/CryLibrary.h>
+	#include "XRenderD3D9/DX12/CryDX12.hpp"
+	#include "XRenderD3D9/DX12/Device/CCryDX12Device.hpp"
+typedef uintptr_t SOCKET;
+#else
 	#include <CryCore/Platform/CryWindows.h>
 	#if CRY_PLATFORM_DURANGO
 		#if defined(ENABLE_PROFILING_CODE)
@@ -298,13 +260,13 @@ enum EVerifyType
 		#define DURANGO_MONOD3D_DRIVER
 		#if defined(DURANGO_MONOD3D_DRIVER)
 			#include "d3d11_x.h" // includes <windows.h>
-			LINK_SYSTEM_LIBRARY("d3d11_x.lib")
+LINK_SYSTEM_LIBRARY("d3d11_x.lib")
 		#else
 			#include "D3D11_1.h" // includes <windows.h>
 			#if defined(USE_INSTRUMENTED_LIBS)
-				LINK_SYSTEM_LIBRARY("d3d11i.lib")
+LINK_SYSTEM_LIBRARY("d3d11i.lib")
 			#else
-				LINK_SYSTEM_LIBRARY("d3d11.lib")
+LINK_SYSTEM_LIBRARY("d3d11.lib")
 			#endif
 		#endif
 	#else
@@ -315,187 +277,7 @@ enum EVerifyType
 		#include <CryCore/Platform/CryWindows.h>
 		#include "d3d9.h" // includes <windows.h>
 	#endif
-#endif
 
-//////////////////////////////////////////////////////////////////////////
-//#define Direct3D IDXGIAdapter
-
-#if defined(CRY_USE_DX12)
-    #if CRY_PLATFORM_DURANGO
-        #define DXGIFactory               IDXGIFactory1
-        #define DXGIDevice                IDXGIDevice2
-        #define DXGIAdapter               IDXGIAdapter2
-        #define DXGIOutput                IDXGIOutput
-        #define DXGISwapChain             IDXGISwapChain1
-        typedef char DXGI_COLOR_SPACE_TYPE;
-        typedef char DXGI_MATRIX_3X2_F;
-    #else
-        #define DXGIFactory               IDXGIFactory4
-        #define DXGIDevice                IDXGIDevice3
-        #define DXGIAdapter               IDXGIAdapter3
-        #define DXGIOutput                IDXGIOutput4
-        #define DXGISwapChain             IDXGISwapChain3
-        #define	IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-    #endif
-
-    #if defined(DEVICE_SUPPORTS_D3D11_1)
-        #define D3DDeviceContext          ID3D11DeviceContext1
-        #define D3DDevice                 ID3D11Device1
-    #else
-        #define D3DDeviceContext          ID3D11DeviceContext
-        #define D3DDevice                 ID3D11Device
-    #endif
-
-#elif defined(DEVICE_SUPPORTS_D3D11_1) && !CRY_PLATFORM_ORBIS
-    #define     DXGIFactory               IDXGIFactory2
-    #define     DXGIDevice                IDXGIDevice1
-    #define     DXGIAdapter               IDXGIAdapter1
-    #define     DXGIOutput                IDXGIOutput1
-    #define     DXGISwapChain             IDXGISwapChain1
-
-    #define     D3DDeviceContext          ID3D11DeviceContext1
-    #define     D3DDevice                 ID3D11Device1
-#else
-    #define     DXGIFactory               IDXGIFactory1
-    #define     DXGIDevice                IDXGIDevice1
-    #define     DXGIAdapter               IDXGIAdapter1
-    #define     DXGIOutput                IDXGIOutput
-    #define     DXGISwapChain             IDXGISwapChain
-
-    #define     D3DDeviceContext          ID3D11DeviceContext
-    #define     D3DDevice                 ID3D11Device
-#endif
-
-#define         D3DVertexDeclaration      ID3D11InputLayout
-#define         D3DVertexShader           ID3D11VertexShader
-#define         D3DPixelShader            ID3D11PixelShader
-#define         D3DResource               ID3D11Resource
-
-#if defined(CRY_USE_GNM_RENDERER)
-    #define     D3DBaseTexture            ID3D11BaseTexture
-#else
-    #define     D3DBaseTexture            ID3D11Resource
-#endif
-
-#define         D3DLookupTexture          ID3D11Texture1D
-#define         D3DTexture                ID3D11Texture2D
-#define         D3DVolumeTexture          ID3D11Texture3D
-#define         D3DCubeTexture            ID3D11Texture2D
-#define         D3DVertexBuffer           ID3D11Buffer
-#define         D3DShaderResource         ID3D11ShaderResourceView
-#define         D3DUAV                    ID3D11UnorderedAccessView
-#define         D3DIndexBuffer            ID3D11Buffer
-#define         D3DBuffer                 ID3D11Buffer
-#define         D3DSurface                ID3D11RenderTargetView
-#define         D3DDepthSurface           ID3D11DepthStencilView
-#define         D3DBaseView               ID3D11View
-#define         D3DQuery                  ID3D11Query
-#define         D3DViewPort               D3D11_VIEWPORT
-#define         D3DRectangle              D3D11_RECT
-#define         D3DFormat                 DXGI_FORMAT
-#define         D3DPrimitiveType          D3D11_PRIMITIVE_TOPOLOGY
-#define         D3DBlob                   ID3D10Blob
-#define         D3DSamplerState           ID3D11SamplerState
-
-#if defined(CRY_USE_DX12_DEVIRTUALIZED)
-    #define     ID3D11DeviceContext1      CCryDX12DeviceContext
-    #define     ID3D11Device1             CCryDX12Device
-    #define     ID3D11DeviceContext       CCryDX12DeviceContext
-    #define     ID3D11Device              CCryDX12Device
-    #define     ID3D11DeviceChild         CCryDX12DeviceChild<IEmptyDeviceChild>
-    #define     ID3D11BlendState          CCryDX12BlendState
-    #define     ID3D11DepthStencilState   CCryDX12DepthStencilState
-    #define     ID3D11RasterizerState     CCryDX12RasterizerState
-    #define     ID3D11SamplerState        CCryDX12SamplerState
-    #define     ID3D11View                CCryDX12View<IEmptyView>
-    #define     ID3D11DepthStencilView    CCryDX12DepthStencilView
-    #define     ID3D11RenderTargetView    CCryDX12RenderTargetView
-    #define     ID3D11ShaderResourceView  CCryDX12ShaderResourceView
-    #define     ID3D11UnorderedAccessView CCryDX12UnorderedAccessView
-    #define     ID3D11Resource            CCryDX12Resource<IEmptyResource>
-    #define     ID3D11Buffer              CCryDX12Buffer
-    #define     ID3D11Texture1D           CCryDX12Texture1D
-    #define     ID3D11Texture2D           CCryDX12Texture2D
-    #define     ID3D11Texture3D           CCryDX12Texture3D
-    #define     ID3D11Asynchronous        CCryDX12Asynchronous<IEmptyAsynchronous>
-    #define     ID3D11Query               CCryDX12Query
-    #define     ID3D11InputLayout         CCryDX12InputLayout
-
-    typedef     IEmptyDeviceContext1      ID3D11DeviceContext1ToImplement;
-    typedef     IEmptyDevice1             ID3D11Device1ToImplement;
-    typedef     IEmptyDeviceContext1      ID3D11DeviceContextToImplement;
-    typedef     IEmptyDevice1             ID3D11DeviceToImplement;
-    typedef     IEmptyDeviceChild         ID3D11DeviceChildToImplement;
-    typedef     IEmptyState               ID3D11BlendStateToImplement;
-    typedef     IEmptyState               ID3D11DepthStencilStateToImplement;
-    typedef     IEmptyState               ID3D11RasterizerStateToImplement;
-    typedef     IEmptyState               ID3D11SamplerStateToImplement;
-    typedef     IEmptyView                ID3D11ViewToImplement;
-    typedef     IEmptyView                ID3D11DepthStencilViewToImplement;
-    typedef     IEmptyView                ID3D11RenderTargetViewToImplement;
-    typedef     IEmptyView                ID3D11ShaderResourceViewToImplement;
-    typedef     IEmptyView                ID3D11UnorderedAccessViewToImplement;
-    typedef     IEmptyResource            ID3D11ResourceToImplement;
-    typedef     IEmptyResource            ID3D11BufferToImplement;
-    typedef     IEmptyResource            ID3D11Texture1DToImplement;
-    typedef     IEmptyResource            ID3D11Texture2DToImplement;
-    typedef     IEmptyResource            ID3D11Texture3DToImplement;
-    typedef     IEmptyAsynchronous        ID3D11AsynchronousToImplement;
-    typedef     IEmptyAsynchronous        ID3D11QueryToImplement;
-    typedef     IEmptyInputLayout         ID3D11InputLayoutToImplement;
-#elif defined(CRY_USE_DX12)
-    #if defined(DEVICE_SUPPORTS_D3D11_1)
-        typedef ID3D11DeviceContext1      ID3D11DeviceContext1ToImplement;
-        typedef ID3D11Device1             ID3D11Device1ToImplement;
-    #endif
-
-    typedef     ID3D11DeviceContext       ID3D11DeviceContextToImplement;
-    typedef     ID3D11Device              ID3D11DeviceToImplement;
-    typedef     ID3D11DeviceChild         ID3D11DeviceChildToImplement;
-    typedef     ID3D11BlendState          ID3D11BlendStateToImplement;
-    typedef     ID3D11DepthStencilState   ID3D11DepthStencilStateToImplement;
-    typedef     ID3D11RasterizerState     ID3D11RasterizerStateToImplement;
-    typedef     ID3D11SamplerState        ID3D11SamplerStateToImplement;
-    typedef     ID3D11DepthStencilView    ID3D11DepthStencilViewToImplement;
-    typedef     ID3D11RenderTargetView    ID3D11RenderTargetViewToImplement;
-    typedef     ID3D11ShaderResourceView  ID3D11ShaderResourceViewToImplement;
-    typedef     ID3D11UnorderedAccessView ID3D11UnorderedAccessViewToImplement;
-    typedef     ID3D11Resource            ID3D11ResourceToImplement;
-    typedef     ID3D11Buffer              ID3D11BufferToImplement;
-    typedef     ID3D11Texture1D           ID3D11Texture1DToImplement;
-    typedef     ID3D11Texture2D           ID3D11Texture2DToImplement;
-    typedef     ID3D11Texture3D           ID3D11Texture3DToImplement;
-    typedef     ID3D11Asynchronous        ID3D11AsynchronousToImplement;
-    typedef     ID3D11Query               ID3D11QueryToImplement;
-    typedef     ID3D11InputLayout         ID3D11InputLayoutToImplement;
-#endif
-
-//////////////////////////////////////////////////////////////////////////
-#define MAX_FRAME_LATENCY    1
-#define MAX_FRAMES_IN_FLIGHT (MAX_FRAME_LATENCY + 1)    // Current and Last
-
-#if defined(CRY_USE_DX12)
-	#include <CryCore/Platform/CryLibrary.h>
-	#include "XRenderD3D9/DX12/CryDX12.hpp"
-
-	#include "XRenderD3D9/DX12/CryDX12Guid.hpp"
-	#include "XRenderD3D9/DX12/Device/CCryDX12Device.hpp"
-	#include "XRenderD3D9/DX12/Device/CCryDX12DeviceContext.hpp"
-	#include "XRenderD3D9/DX12/Device/CCryDX12DeviceChild.hpp"
-	#include "XRenderD3D9/DX12/Resource/State/CCryDX12SamplerState.hpp"
-	#include "XRenderD3D9/DX12/Resource/CCryDX12View.hpp"
-	#include "XRenderD3D9/DX12/Resource/View/CCryDX12DepthStencilView.hpp"
-	#include "XRenderD3D9/DX12/Resource/View/CCryDX12RenderTargetView.hpp"
-	#include "XRenderD3D9/DX12/Resource/View/CCryDX12ShaderResourceView.hpp"
-	#include "XRenderD3D9/DX12/Resource/View/CCryDX12UnorderedAccessView.hpp"
-	#include "XRenderD3D9/DX12/Resource/Misc/CCryDX12Buffer.hpp"
-	#include "XRenderD3D9/DX12/Resource/Texture/CCryDX12Texture1D.hpp"
-	#include "XRenderD3D9/DX12/Resource/Texture/CCryDX12Texture2D.hpp"
-	#include "XRenderD3D9/DX12/Resource/Texture/CCryDX12Texture3D.hpp"
-	#include "XRenderD3D9/DX12/Resource/CCryDX12Asynchronous.hpp"
-	#include "XRenderD3D9/DX12/Resource/Misc/CCryDX12Query.hpp"
-	#include "XRenderD3D9/DX12/Resource/Misc/CCryDX12InputLayout.hpp"
-	typedef uintptr_t SOCKET;
 #endif
 
 #if CRY_PLATFORM_DURANGO
@@ -527,7 +309,69 @@ enum EVerifyType
 #endif
 
 #include <Cry3DEngine/I3DEngine.h>
+#include <CryGame/IGame.h>
 
+#define Direct3D IDXGIAdapter
+
+#if defined(CRY_USE_DX12)
+	#define DXGIFactory        IDXGIFactory4
+	#define DXGIDevice         IDXGIDevice3
+	#define DXGIAdapter        IDXGIAdapter3
+	#define DXGIOutput         IDXGIOutput4
+	#define DXGISwapChain      IDXGISwapChain3
+	#if defined(DEVICE_SUPPORTS_D3D11_1)
+		#define D3DDeviceContext ID3D11DeviceContext1
+		#define D3DDevice        ID3D11Device1
+	#else
+		#define D3DDeviceContext ID3D11DeviceContext
+		#define D3DDevice        ID3D11Device
+	#endif
+#elif defined(DEVICE_SUPPORTS_D3D11_1) && !CRY_PLATFORM_ORBIS
+	#define DXGIFactory      IDXGIFactory2
+	#define DXGIDevice       IDXGIDevice1
+	#define DXGIAdapter      IDXGIAdapter1
+	#define DXGIOutput       IDXGIOutput1
+	#define DXGISwapChain    IDXGISwapChain1
+	#define D3DDeviceContext ID3D11DeviceContext1
+	#define D3DDevice        ID3D11Device1
+#else
+	#define DXGIFactory      IDXGIFactory1
+	#define DXGIDevice       IDXGIDevice1
+	#define DXGIAdapter      IDXGIAdapter1
+	#define DXGIOutput       IDXGIOutput
+	#define DXGISwapChain    IDXGISwapChain
+	#define D3DDeviceContext ID3D11DeviceContext
+	#define D3DDevice        ID3D11Device
+#endif
+
+#define D3DVertexDeclaration ID3D11InputLayout
+#define D3DVertexShader      ID3D11VertexShader
+#define D3DPixelShader       ID3D11PixelShader
+#define D3DResource          ID3D11Resource
+#if defined(CRY_USE_GNM_RENDERER)
+	#define D3DBaseTexture     ID3D11BaseTexture
+#else
+	#define D3DBaseTexture     ID3D11Resource
+#endif
+#define D3DLookupTexture     ID3D11Texture1D
+#define D3DTexture           ID3D11Texture2D
+#define D3DVolumeTexture     ID3D11Texture3D
+#define D3DCubeTexture       ID3D11Texture2D
+#define D3DVertexBuffer      ID3D11Buffer
+#define D3DShaderResource    ID3D11ShaderResourceView
+#define D3DUAV               ID3D11UnorderedAccessView
+#define D3DIndexBuffer       ID3D11Buffer
+#define D3DBuffer            ID3D11Buffer
+#define D3DSurface           ID3D11RenderTargetView
+#define D3DDepthSurface      ID3D11DepthStencilView
+#define D3DBaseView          ID3D11View
+#define D3DQuery             ID3D11Query
+#define D3DViewPort          D3D11_VIEWPORT
+#define D3DRectangle         D3D11_RECT
+#define D3DFormat            DXGI_FORMAT
+#define D3DPrimitiveType     D3D11_PRIMITIVE_TOPOLOGY
+#define D3DBlob              ID3D10Blob
+#define D3DSamplerState      ID3D11SamplerState
 
 #if defined(CRY_USE_DX12)
 // ConstantBuffer/ShaderResource/UnorderedAccess need markers,
@@ -544,15 +388,12 @@ enum EVerifyType
 	#define D3D11_MAP_WRITE_NO_OVERWRITE_SR (D3D11_MAP_WRITE_NO_OVERWRITE)
 	#define D3D11_MAP_WRITE_NO_OVERWRITE_UA (D3D11_MAP_WRITE_NO_OVERWRITE)
 
-	#define D3D11_COPY_NO_OVERWRITE_REVERT  D3D11_COPY_FLAGS(D3D11_COPY_NO_OVERWRITE + DX12_COPY_REVERTSTATE_MARKER)
-	#define D3D11_COPY_NO_OVERWRITE_PXLSRV  D3D11_COPY_FLAGS(D3D11_COPY_NO_OVERWRITE + DX12_COPY_PIXELSTATE_MARKER)
-	#define D3D11_RESOURCE_MISC_UAV_OVERLAP D3D11_RESOURCE_MISC_FLAG(DX12_RESOURCE_FLAG_OVERLAP)
 #else
-	#define D3D11_MAP_WRITE_DISCARD_VB      (D3D11_MAP_WRITE_DISCARD)
-	#define D3D11_MAP_WRITE_DISCARD_IB      (D3D11_MAP_WRITE_DISCARD)
-	#define D3D11_MAP_WRITE_DISCARD_CB      (D3D11_MAP_WRITE_DISCARD)
-	#define D3D11_MAP_WRITE_DISCARD_SR      (D3D11_MAP_WRITE_DISCARD)
-	#define D3D11_MAP_WRITE_DISCARD_UA      (D3D11_MAP_WRITE_DISCARD)
+	#define D3D11_MAP_WRITE_DISCARD_VB (D3D11_MAP_WRITE_DISCARD)
+	#define D3D11_MAP_WRITE_DISCARD_IB (D3D11_MAP_WRITE_DISCARD)
+	#define D3D11_MAP_WRITE_DISCARD_CB (D3D11_MAP_WRITE_DISCARD)
+	#define D3D11_MAP_WRITE_DISCARD_SR (D3D11_MAP_WRITE_DISCARD)
+	#define D3D11_MAP_WRITE_DISCARD_UA (D3D11_MAP_WRITE_DISCARD)
 
 // NO_OVERWRITE on CBs/SRs-UAs could actually work when we require 11.1
 // and check the feature in D3D11_FEATURE_DATA_D3D11_OPTIONS
@@ -562,9 +403,6 @@ enum EVerifyType
 	#define D3D11_MAP_WRITE_NO_OVERWRITE_SR (D3D11_MAP_WRITE_DISCARD)
 	#define D3D11_MAP_WRITE_NO_OVERWRITE_UA (D3D11_MAP_WRITE_DISCARD)
 
-	#define D3D11_COPY_NO_OVERWRITE_REVERT  D3D11_COPY_NO_OVERWRITE
-	#define D3D11_COPY_NO_OVERWRITE_PXLSRV  D3D11_COPY_NO_OVERWRITE
-	#define D3D11_RESOURCE_MISC_UAV_OVERLAP D3D11_RESOURCE_MISC_FLAG(0)
 #endif
 
 #if !defined(USE_D3DX)
@@ -838,7 +676,7 @@ unsigned sizeOfMapS(Map& map)
 	#define VOLUMETRIC_FOG_SHADOWS
 #endif
 
-#if CRY_PLATFORM_WINDOWS && !defined(CRY_USE_DX12) && !(defined(OPENGL) && defined(RELEASE))
+#if CRY_PLATFORM_WINDOWS && !(defined(OPENGL) && defined(RELEASE))
 	#define ENABLE_NULL_D3D11DEVICE
 #endif
 
@@ -872,7 +710,7 @@ unsigned sizeOfMapS(Map& map)
 
 // The below submits the device context state changes and draw commands
 // asynchronously via a high priority packet queue.
-// Note: please continuously monitor ASYNC_DIP_SYNC profile marker for stalls
+// Note: please continously monitor ASYNC_DIP_SYNC profile marker for stalls
 #if CRY_PLATFORM_DURANGO
 	#define DURANGO_ENABLE_ASYNC_DIPS 1
 #endif
@@ -896,8 +734,8 @@ unsigned sizeOfMapS(Map& map)
 //#include "_Malloc.h"
 //#include "math.h"
 #include <CryCore/StlUtils.h>
-#include "XRenderD3D9/DeviceManager/DeviceManager.h"
 #include "Common/DevBuffer.h"
+#include "XRenderD3D9/DeviceManager/DeviceManager.h"
 
 #include <CryRenderer/VertexFormats.h>
 
@@ -924,6 +762,7 @@ unsigned sizeOfMapS(Map& map)
 
 // All handled render elements (except common ones included in "RendElement.h")
 #include "Common/RendElements/CREBeam.h"
+#include "Common/RendElements/CREClientPoly.h"
 #include "Common/RendElements/CRELensOptics.h"
 #include "Common/RendElements/CREHDRProcess.h"
 #include "Common/RendElements/CRECloud.h"
@@ -932,7 +771,7 @@ unsigned sizeOfMapS(Map& map)
 
 #include "Common/PostProcess/PostProcess.h"
 
-#include "../XRenderD3D9/DeviceManager/DeviceObjects.h"
+#include "../XRenderD3D9/DeviceManager/DeviceWrapper12.h"
 
 /*-----------------------------------------------------------------------------
    Vector transformations.
@@ -1189,6 +1028,23 @@ void fpUsePath(const char* name, const char* path, char (&dst)[bytes]) { fpUsePa
 #endif
 
 #include "Common/Defs.h"
+
+#define FUNCTION_PROFILER_RENDERER FUNCTION_PROFILER(iSystem, PROFILE_RENDERER)
+
+#define SCOPED_RENDERER_ALLOCATION_NAME_HINT(str)
+
+#define SHADER_ASYNC_COMPILATION
+
+#if !defined(_RELEASE)
+//# define DETAILED_PROFILING_MARKERS
+#endif
+#if defined(DETAILED_PROFILING_MARKERS)
+	#define DETAILED_PROFILE_MARKER(x) DETAILED_PROFILE_MARKER((x))
+#else
+	#define DETAILED_PROFILE_MARKER(x) (void)0
+#endif
+
+#define RAIN_OCC_MAP_SIZE 256
 
 #include "XRenderD3D9/DeviceManager/DeviceManagerInline.h"
 #include <CrySystem/Profilers/FrameProfiler/FrameProfiler_JobSystem.h>  // to be removed

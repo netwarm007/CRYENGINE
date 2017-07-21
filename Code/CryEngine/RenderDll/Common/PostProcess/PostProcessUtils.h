@@ -53,9 +53,6 @@ struct SPostEffectsUtils
 	static void GetFullScreenTri(SVF_P3F_C4B_T2F pResult[3], int nTexWidth, int nTexHeight, float z = 0, const RECT* pSrcRegion = NULL);
 	static void GetFullScreenTriWPOS(SVF_P3F_T2F_T3F pResult[3], int nTexWidth, int nTexHeight, float z = 0, const RECT* pSrcRegion = NULL);
 
-	static void GetFullScreenQuad(SVF_P3F_C4B_T2F pResult[4], int nTexWidth, int nTexHeight, float z = 0, const RECT* pSrcRegion = NULL);
-	static void GetFullScreenQuadWPOS(SVF_P3F_T2F_T3F pResult[4], int nTexWidth, int nTexHeight, float z = 0, const RECT* pSrcRegion = NULL);
-
 	// Draws fullscreen aligned triangle
 	static void DrawFullScreenTri(int nTexWidth, int nTexHeight, float z = 0, const RECT* pSrcRegion = NULL);
 	static void DrawFullScreenTriWPOS(int nTexWidth, int nTexHeight, float z = 0, const RECT* pSrcRegion = NULL);
@@ -85,8 +82,6 @@ struct SPostEffectsUtils
 
 	// Clear active render target region
 	static void ClearScreen(float r, float g, float b, float a);
-
-	static void GetFrustumCorners(Vec3& vRT, Vec3& vLT, Vec3& vLB, Vec3& vRB, const CRenderCamera& rc, bool bMirrorCull);
 
 	static void UpdateFrustumCorners();
 	static void UpdateOverscanBorderAspectRatio();

@@ -5,7 +5,7 @@
 
 #include "AIActor.h" // Big one, but needed for timestamp collection
 #include "Puppet.h"  // Big one, but needed for the posture manager
-#include "AIBubblesSystem/AIBubblesSystem.h"
+#include "AIBubblesSystem/IAIBubblesSystem.h"
 #include "AIGroup.h"
 #include "Group/GroupManager.h"
 #include <CryAISystem/BehaviorTree/Action.h>
@@ -24,10 +24,9 @@
 #include "TargetSelection/TargetTrackManager.h"
 #include "BehaviorTree/BehaviorTreeNodes_Helicopter.h"
 #include <CryString/CryName.h>
+#include "ICryMannequin.h"
 #include <CryGame/IGameFramework.h>
 #include "BehaviorTreeManager.h"
-
-#include <../CryAction/ICryMannequin.h>
 
 namespace
 {
@@ -2940,9 +2939,9 @@ private:
 #if !defined(SYS_ENV_AS_STRUCT)
 		assert(gEnv != NULL);
 #endif
-		assert(gEnv->pGameFramework != NULL);
+		assert(gEnv->pGame != NULL);
 
-		IGameFramework* gameFramework = gEnv->pGameFramework;
+		IGameFramework* gameFramework = gEnv->pGame->GetIGameFramework();
 		IF_UNLIKELY (gameFramework == NULL)
 		{
 			return NULL;

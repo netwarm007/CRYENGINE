@@ -825,6 +825,10 @@ void SD3DPostEffectsUtils::TexBlurGaussian(CTexture* pTex, int nAmount, float fS
 		clampTC = Vec4(0.0f, gRenDev->m_RP.m_CurDownscaleFactor.x, 0.0f, gRenDev->m_RP.m_CurDownscaleFactor.y);
 	}
 
+	//SetTexture(pTex, 0, FILTER_LINEAR);
+	CShaderMan::s_shPostEffects->FXSetPSFloat(clampTCName, &clampTC, 1);
+	CShaderMan::s_shPostEffects->FXSetPSFloat(pParam0Name, pWeightsPS, nHalfSamples);
+
 	//for(int p(1); p<= nAmount; ++p)
 	{
 		//Horizontal
@@ -835,9 +839,6 @@ void SD3DPostEffectsUtils::TexBlurGaussian(CTexture* pTex, int nAmount, float fS
 
 		// !force updating constants per-pass! (dx10..)
 		CShaderMan::s_shPostEffects->FXBeginPass(0);
-
-		CShaderMan::s_shPostEffects->FXSetPSFloat(clampTCName, &clampTC, 1);
-		CShaderMan::s_shPostEffects->FXSetPSFloat(pParam0Name, pWeightsPS, nHalfSamples);
 
 		pTex->Apply(0, CTexture::GetTexState(sTexState));
 		if (pMask)
@@ -856,9 +857,6 @@ void SD3DPostEffectsUtils::TexBlurGaussian(CTexture* pTex, int nAmount, float fS
 
 		// !force updating constants per-pass! (dx10..)
 		CShaderMan::s_shPostEffects->FXBeginPass(0);
-
-		CShaderMan::s_shPostEffects->FXSetPSFloat(clampTCName, &clampTC, 1);
-		CShaderMan::s_shPostEffects->FXSetPSFloat(pParam0Name, pWeightsPS, nHalfSamples);
 
 		CShaderMan::s_shPostEffects->FXSetVSFloat(pParam1Name, pVParams, nHalfSamples);
 		pTempRT->Apply(0, CTexture::GetTexState(sTexState));
@@ -1013,6 +1011,10 @@ bool CD3D9Renderer::FX_PostProcessScene(bool bEnable)
 			PostProcessUtils().Create();
 		}
 	}
+	else if (!CRenderer::CV_r_PostProcess && !CRenderer::CV_r_HDRRendering && CTexture::s_ptexBackBuffer)
+	{
+		PostProcessUtils().Release();
+	}
 
 	return true;
 }
@@ -1111,12 +1113,10 @@ void CPostEffectsMgr::End()
 	gRenDev->SetPreviousFrameCameraMatrix(gcpRendD3D->GetCameraMatrix());
 	gRenDev->m_CameraMatrixNearestPrev = gRenDev->m_CameraMatrixNearest;
 
-	const int kFloatMaxContinuousInt = 0x1000000;  // 2^24
+	const int kFloatMaxContinousInt = 0x1000000;  // 2^24
 	const bool bStereo = gcpRendD3D->GetS3DRend().IsStereoEnabled();
-	const bool bStereoSequentialSubmission = gcpRendD3D->GetS3DRend().GetStereoSubmissionMode() == STEREO_SUBMISSION_SEQUENTIAL;
-
-	if (!bStereo || (bStereo && (!bStereoSequentialSubmission || gRenDev->m_CurRenderEye == RIGHT_EYE)))
-		SPostEffectsUtils::m_iFrameCounter = (SPostEffectsUtils::m_iFrameCounter + 1) % kFloatMaxContinuousInt;
+	if (!bStereo || (bStereo && gRenDev->m_CurRenderEye == RIGHT_EYE))
+		SPostEffectsUtils::m_iFrameCounter = (SPostEffectsUtils::m_iFrameCounter + 1) % kFloatMaxContinousInt;
 
 	PostProcessUtils().Log("### POST-PROCESSING ENDS ### ");
 }
@@ -1127,7 +1127,7 @@ void CPostEffectsMgr::End()
 bool CREPostProcess::mfDraw(CShader* ef, SShaderPass* sfm)
 {
 	CPostEffectsMgr* pPostMgr = PostEffectMgr();
-	IF (!gcpRendD3D || !CRenderer::CV_r_PostProcess || pPostMgr->GetEffects().empty() || (gcpRendD3D->GetWireframeMode() > R_SOLID_MODE && gcpRendD3D->m_nGraphicsPipeline == 0), 0)
+	IF (!gcpRendD3D || !CRenderer::CV_r_PostProcess || pPostMgr->GetEffects().empty() || gcpRendD3D->GetWireframeMode() > R_SOLID_MODE, 0)
 		return 0;
 
 	// Skip hdr/post processing when rendering different camera views
@@ -1214,17 +1214,21 @@ bool CREPostProcess::mfDraw(CShader* ef, SShaderPass* sfm)
 
 	if (!activeEffects.empty() && CRenderer::CV_r_PostProcess >= 2) // Debug output for active post effects
 	{
+		SDrawTextInfo pDrawTexInfo;
 		if (CRenderer::CV_r_PostProcess >= 2)
 		{
 			int nPosY = 20;
-			IRenderAuxText::Draw2dText(30, nPosY += 15, Vec3(0, 1, 0), "Active post effects:");
+			pDrawTexInfo.color[0] = pDrawTexInfo.color[2] = 0.0f;
+			pDrawTexInfo.color[1] = 1.0f;
+			gcpRendD3D->Draw2dText(30, nPosY += 15, "Active post effects:", pDrawTexInfo);
 
+			pDrawTexInfo.color[0] = pDrawTexInfo.color[1] = pDrawTexInfo.color[2] = 1.0f;
 			for (uint32 i = 0, nNumEffects = activeEffects.size(); i < nNumEffects; ++i)
 			{
 				SPostEffectsDebugInfo& debugInfo = activeEffects[i];
 				if (debugInfo.fTimeOut > 0.0f)
 				{
-					IRenderAuxText::Draw2dText(30, nPosY += 10, Vec3(1), debugInfo.pEffect->GetName());
+					gcpRendD3D->Draw2dText(30, nPosY += 10, debugInfo.pEffect->GetName(), pDrawTexInfo);
 				}
 				debugInfo.fTimeOut -= gEnv->pTimer->GetFrameTime();
 			}
@@ -1257,9 +1261,11 @@ bool CREPostProcess::mfDraw(CShader* ef, SShaderPass* sfm)
 				}
 
 				int nPosX = 250, nPosY = 5;
+				pDrawTexInfo.color[0] = pDrawTexInfo.color[2] = 0.0f;
+				pDrawTexInfo.color[1] = 1.0f;
+				gcpRendD3D->Draw2dText(nPosX, nPosY += 15, "Frame parameters:", pDrawTexInfo);
 
-				IRenderAuxText::Draw2dText(nPosX, nPosY += 15, Vec3(0, 1, 0), "Frame parameters:");
-
+				pDrawTexInfo.color[0] = pDrawTexInfo.color[1] = pDrawTexInfo.color[2] = 1.0f;
 				for (uint32 p = 0, nNumParams = activeParams.size(); p < nNumParams; ++p)
 				{
 					SPostEffectsDebugInfo& debugInfo = activeParams[p];
@@ -1267,7 +1273,7 @@ bool CREPostProcess::mfDraw(CShader* ef, SShaderPass* sfm)
 					{
 						char pNameAndValue[128];
 						cry_sprintf(pNameAndValue, "%s: %.4f\n", debugInfo.szParamName.c_str(), debugInfo.fParamVal);
-						IRenderAuxText::Draw2dText(nPosX, nPosY += 10, Vec3(1), pNameAndValue);
+						gcpRendD3D->Draw2dText(nPosX, nPosY += 10, pNameAndValue, pDrawTexInfo);
 					}
 					debugInfo.fTimeOut -= gEnv->pTimer->GetFrameTime();
 				}

@@ -155,15 +155,18 @@ struct SObjManRenderDebugInfo
 	SObjManRenderDebugInfo()
 		: pEnt(nullptr)
 		, fEntDistance(0.0f)
+		, nDLightMask(0)
 	{}
 
-	SObjManRenderDebugInfo(IRenderNode* _pEnt, float _fEntDistance)
+	SObjManRenderDebugInfo(IRenderNode* _pEnt, float _fEntDistance, int _nDLightMask)
 		: pEnt(_pEnt)
 		, fEntDistance(_fEntDistance)
+		, nDLightMask(_nDLightMask)
 	{}
 
 	IRenderNode* pEnt;
 	float        fEntDistance;
+	int          nDLightMask;
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -238,13 +241,15 @@ public:
 	void MakeShadowCastersList(CVisArea* pReceiverArea, const AABB& aabbReceiver,
 	                           int dwAllowedTypes, int32 nRenderNodeFlags, Vec3 vLightPos, CDLight* pLight, ShadowMapFrustum* pFr, PodArray<struct SPlaneObject>* pShadowHull, const SRenderingPassInfo& passInfo);
 
-	int MakeStaticShadowCastersList(IRenderNode* pIgnoreNode, ShadowMapFrustum* pFrustum, const PodArray<struct SPlaneObject>* pShadowHull, int renderNodeExcludeFlags, int nMaxNodes, const SRenderingPassInfo& passInfo);
+	int MakeStaticShadowCastersList(IRenderNode* pIgnoreNode, ShadowMapFrustum* pFrustum, int renderNodeExcludeFlags, int nMaxNodes, const SRenderingPassInfo& passInfo);
 
 	// decal pre-caching
 	typedef std::vector<IDecalRenderNode*> DecalsToPrecreate;
 	DecalsToPrecreate m_decalsToPrecreate;
 
-	void                    PrecacheStatObjMaterial(IMaterial* pMaterial, const float fEntDistance, IStatObj* pStatObj, bool bFullUpdate, bool bDrawNear);
+	void PrecacheStatObjMaterial(IMaterial* pMaterial, const float fEntDistance, IStatObj* pStatObj, bool bFullUpdate, bool bDrawNear);
+	void PrecacheCharacter(IRenderNode* pObj, const float fImportance, ICharacterInstance* pCharacter, IMaterial* pSlotMat,
+	                       const Matrix34& matParent, const float fEntDistance, const float fScale, int nMaxDepth, bool bFullUpdate, bool bDrawNear, int nLod);
 
 	void                    PrecacheStatObj(CStatObj* pStatObj, int nLod, const Matrix34A& statObjMatrix, IMaterial* pMaterial, float fImportance, float fEntDistance, bool bFullUpdate, bool bHighPriority);
 
@@ -313,16 +318,13 @@ public:
 										 SSectorTextureSet * pTerrainTexInfo,
 										 const AABB &objBox, float fEntDistance, bool bSunOnly,
 										 CVisArea * pVisArea, bool nCheckOcclusion, const SRenderingPassInfo &passInfo);
-
-	int  ComputeDissolve(const CLodValue& lodValueIn, IRenderNode* pEnt, float fEntDistance, CLodValue arrlodValuesOut[2]);
-
 	void RenderDecalAndRoad(IRenderNode* pEnt, PodArray<CDLight*>* pAffectingLights,
 	                        const Vec3& vAmbColor, const AABB& objBox, float fEntDistance,
 	                        bool bSunOnly, bool nCheckOcclusion, const SRenderingPassInfo& passInfo);
 
-	void      RenderObjectDebugInfo(IRenderNode* pEnt, float fEntDistance, const SRenderingPassInfo& passInfo);
+	void      RenderObjectDebugInfo(IRenderNode* pEnt, float fEntDistance, int nDLightMask, const SRenderingPassInfo& passInfo);
 	void      RenderAllObjectDebugInfo();
-	void      RenderObjectDebugInfo_Impl(IRenderNode* pEnt, float fEntDistance);
+	void      RenderObjectDebugInfo_Impl(IRenderNode* pEnt, float fEntDistance, int nDLightMask);
 	void      RemoveFromRenderAllObjectDebugInfo(IRenderNode* pEnt);
 
 	float     GetXYRadius(int nType, int nSID = GetDefSID());
@@ -339,6 +341,20 @@ public:
 	                        bool bIndoorOccludersOnly,
 	                        EOcclusionObjectType eOcclusionObjectType,
 	                        const SRenderingPassInfo& passInfo);
+
+	void AddDecalToRenderer(float fDistance,
+	                        IMaterial* pMat,
+	                        const int nDynLMask,
+	                        const uint8 sortPrio,
+	                        Vec3 right,
+	                        Vec3 up,
+	                        const UCol& ucResCol,
+	                        const uint8 uBlendType,
+	                        const Vec3& vAmbientColor,
+	                        Vec3 vPos,
+	                        const int nAfterWater,
+	                        const SRenderingPassInfo& passInfo,
+	                        CVegetation* pVegetation);
 
 	// tmp containers (replacement for local static vars)
 
@@ -446,6 +462,9 @@ public:
 	static void FillTerrainTexInfo(IOctreeNode* pOcNode, float fEntDistance, struct SSectorTextureSet*& pTerrainTexInfo, const AABB& objBox);
 	PodArray<CVisArea*> m_tmpAreas0, m_tmpAreas1;
 
+	uint8        GetDissolveRef(float fDist, float fMaxViewDist);
+	float        GetLodDistDissolveRef(SLodDistDissolveTransitionState* pState, float curDist, int nNewLod, const SRenderingPassInfo& passInfo);
+
 	void         CleanStreamingData();
 	IRenderMesh* GetRenderMeshBox();
 
@@ -453,8 +472,15 @@ public:
 	void         BeginOcclusionCulling(const SRenderingPassInfo& passInfo);
 	void         EndOcclusionCulling();
 	void         RenderBufferedRenderMeshes(const SRenderingPassInfo& passInfo);
-	uint32       GetResourcesModificationChecksum(IRenderNode* pOwnerNode) const;
+	uint32			 GetResourcesModificationChecksum(IRenderNode * pOwnerNode) const;
 	bool         AddOrCreatePersistentRenderObject(SRenderNodeTempData* pTempData, CRenderObject*& pRenderObject, const CLodValue* pLodValue, const SRenderingPassInfo& passInfo) const;
+
+private:
+	void PrecacheCharacterCollect(IRenderNode* pObj, const float fImportance, ICharacterInstance* pCharacter, IMaterial* pSlotMat,
+	                              const Matrix34& matParent, const float fEntDistance, const float fScale, int nMaxDepth, bool bFullUpdate, bool bDrawNear, int nLod,
+	                              const int nRoundId, std::vector<std::pair<IMaterial*, float>>& collectedMaterials);
+
+	std::vector<std::pair<IMaterial*, float>> m_collectedMaterials;
 
 public:
 	//////////////////////////////////////////////////////////////////////////

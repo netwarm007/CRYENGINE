@@ -12,45 +12,23 @@
 
 #if defined(FEATURE_SVO_GI)
 
-class CSvoComputePass : public CComputeRenderPass
-{
-public:
-
-	CSvoComputePass()
-		: CComputeRenderPass::CComputeRenderPass(CSvoComputePass::eFlags_ReflectConstantBuffersFromShader)
-	{ 
-	}
-
-	int nPrevTargetSize = 0;
-};
-
-class CSvoFullscreenPass : public CFullscreenPass
-{
-public:
-
-	int nPrevTargetSize = 0;
-};
-
 struct SSvoTargetsSet
 {
+	SSvoTargetsSet() { ZeroStruct(*this); }
 	void Release();
 
 	CTexture
 	// tracing targets
-	* pRT_RGB_0 = nullptr, * pRT_ALD_0 = nullptr,
-	* pRT_RGB_1 = nullptr, * pRT_ALD_1 = nullptr,
+	* pRT_RGB_0, * pRT_ALD_0,
+	* pRT_RGB_1, * pRT_ALD_1,
 	// de-mosaic targets
-	* pRT_RGB_DEM_MIN_0 = nullptr, * pRT_ALD_DEM_MIN_0 = nullptr,
-	* pRT_RGB_DEM_MAX_0 = nullptr, * pRT_ALD_DEM_MAX_0 = nullptr,
-	* pRT_RGB_DEM_MIN_1 = nullptr, * pRT_ALD_DEM_MIN_1 = nullptr,
-	* pRT_RGB_DEM_MAX_1 = nullptr, * pRT_ALD_DEM_MAX_1 = nullptr,
+	* pRT_RGB_DEM_MIN_0, * pRT_ALD_DEM_MIN_0,
+	* pRT_RGB_DEM_MAX_0, * pRT_ALD_DEM_MAX_0,
+	* pRT_RGB_DEM_MIN_1, * pRT_ALD_DEM_MIN_1,
+	* pRT_RGB_DEM_MAX_1, * pRT_ALD_DEM_MAX_1,
 	// output
-	* pRT_FIN_OUT_0 = nullptr,
-	* pRT_FIN_OUT_1 = nullptr;
-
-	CSvoFullscreenPass passConeTrace;
-	CSvoFullscreenPass passDemosaic;
-	CSvoFullscreenPass passUpscale;
+	* pRT_FIN_OUT_0,
+	* pRT_FIN_OUT_1;
 };
 
 class CSvoRenderer : public ISvoRenderer
@@ -87,37 +65,32 @@ protected:
 	void             SetEditingHelper(const Sphere& sp);
 	bool             IsShaderItemUsedForVoxelization(SShaderItem& rShaderItem, IRenderNode* pRN);
 	static CTexture* GetGBuffer(int nId);
-	void             UpscalePass(SSvoTargetsSet* pTS);
+	void             UpScalePass(SSvoTargetsSet* pTS);
 	void             DemosaicPass(SSvoTargetsSet* pTS);
 	void             ConeTracePass(SSvoTargetsSet* pTS);
-
-	template<class T>
-	void SetupCommonConstants(SSvoTargetsSet* pTS, T &rp, CTexture * pRT);
-
-	template<class T> void SetupRsmSun(T & rp);
+	void             SetupRsmSun(const EHWShaderClass eShClass);
 	void             TropospherePass();
-
-	void SetupGBufferTextures(CSvoFullscreenPass &rp);
-
+	void             SetShaderFloat(const EHWShaderClass eShClass, const CCryNameR& NameParam, const Vec4* fParams, int nParams);
 	void             CheckCreateUpdateRT(CTexture*& pTex, int nWidth, int nHeight, ETEX_Format eTF, ETEX_Type eTT, int nTexFlags, const char* szName);
 
-	CSvoComputePass m_passClearBricks;
-	CSvoComputePass m_passInjectDynamicLights;
-	CSvoComputePass m_passInjectStaticLights;
-	CSvoComputePass m_passInjectAirOpacity;
-	CSvoComputePass m_passPropagateLighting_1to2;
-	CSvoComputePass m_passPropagateLighting_2to3;
-
-	CSvoFullscreenPass m_passTroposphere;
+	enum EComputeStages
+	{
+		eCS_ClearBricks,
+		eCS_InjectDynamicLights,
+		eCS_InjectStaticLights,
+		eCS_InjectAirOpacity,
+		eCS_PropagateLighting_1to2,
+		eCS_PropagateLighting_2to3,
+	};
 
 	void UpdateGpuVoxParams(I3DEngine::SSvoNodeInfo& nodeInfo);
-	void ExecuteComputeShader(const char* szTechFinalName, CSvoComputePass & rp, int* nNodesForUpdateStartIndex, int nObjPassId, PodArray<I3DEngine::SSvoNodeInfo>& arrNodesForUpdate);
-	uint64 GetRunTimeFlags(bool bDiffuseMode = true, bool bPixelShader = true);
-	template<class T> void SetupSvoTexturesForRead(I3DEngine::SSvoStaticTexInfo& texInfo, T & rp, int nStage, int nStageOpa = 0, int nStageNorm = 0);
-	void SetupNodesForUpdate(int& nNodesForUpdateStartIndex, PodArray<I3DEngine::SSvoNodeInfo>& arrNodesForUpdate, CSvoComputePass & rp);
+	void ExecuteComputeShader(CShader* pSH, const char* szTechFinalName, EComputeStages etiStage, int* nNodesForUpdateStartIndex, int nObjPassId, PodArray<I3DEngine::SSvoNodeInfo>& arrNodesForUpdate);
+	void SetShaderFlags(bool bDiffuseMode = true, bool bPixelShader = true);
+	void SetupSvoTexturesForRead(I3DEngine::SSvoStaticTexInfo& texInfo, EHWShaderClass eShaderClass, int nStage, int nStageOpa = 0, int nStageNorm = 0);
+	void SetupNodesForUpdate(int& nNodesForUpdateStartIndex, PodArray<I3DEngine::SSvoNodeInfo>& arrNodesForUpdate);
 	void CheckAllocateRT(bool bSpecPass);
-	template<class T> void SetupLightSources(PodArray<I3DEngine::SLightTI>& lightsTI, T & rp);
-	template<class T> void BindTiledLights(PodArray<I3DEngine::SLightTI>& lightsTI, T & rp);
+	void SetupLightSources(PodArray<I3DEngine::SLightTI>& lightsTI, CShader* pShader, bool bPS);
+	void BindTiledLights(PodArray<I3DEngine::SLightTI>& lightsTI, CDeviceManager::SHADER_TYPE shaderType);
 	void DrawPonts(PodArray<SVF_P3F_C4B_T2F>& arrVerts);
 	void InitCVarValues();
 	void VoxelizeRE();
@@ -151,7 +124,6 @@ protected:
 		int     nTexId;
 		D3DUAV* pUAV;
 		D3DShaderResource* pSRV;
-		CTexture* pTex;
 	};
 
 	SVoxPool vp_OPAC;
@@ -202,8 +174,7 @@ protected:
 	  INIT_SVO_CVAR(float, e_svoMinNodeSize);                       \
 	  INIT_SVO_CVAR(float, e_svoMaxNodeSize);                       \
 	  INIT_SVO_CVAR(int, e_svoTI_LowSpecMode);                      \
-	  INIT_SVO_CVAR(int, e_svoTI_HalfresKernelPrimary);             \
-	  INIT_SVO_CVAR(int, e_svoTI_HalfresKernelSecondary);           \
+	  INIT_SVO_CVAR(int, e_svoTI_HalfresKernel);                    \
 	  INIT_SVO_CVAR(int, e_svoVoxelPoolResolution);                 \
 	  INIT_SVO_CVAR(int, e_svoTI_Apply);                            \
 	  INIT_SVO_CVAR(float, e_svoTI_Diffuse_Spr);                    \
@@ -245,19 +216,13 @@ protected:
 	  INIT_SVO_CVAR(float, e_svoTI_EmissiveMultiplier);             \
 	  INIT_SVO_CVAR(float, e_svoTI_PointLightsMultiplier);          \
 	  INIT_SVO_CVAR(float, e_svoTI_TemporalFilteringBase);          \
+	  INIT_SVO_CVAR(float, e_svoTI_TemporalFilteringMinDistance);   \
 	  INIT_SVO_CVAR(float, e_svoTI_HighGlossOcclusion);             \
 	  INIT_SVO_CVAR(float, e_svoTI_VegetationMaxOpacity);           \
 	  INIT_SVO_CVAR(float, e_svoTI_MinReflectance);                 \
 	  INIT_SVO_CVAR(int, e_svoTI_DualTracing);                      \
 	  INIT_SVO_CVAR(int, e_svoTI_AnalyticalOccluders);              \
 		INIT_SVO_CVAR(int, e_svoTI_RsmUseColors);											\
-		INIT_SVO_CVAR(float, e_svoTI_AnalyticalOccludersRange);				\
-		INIT_SVO_CVAR(float, e_svoTI_AnalyticalOccludersSoftness);		\
-		INIT_SVO_CVAR(int, e_svoTI_AnalyticalGI);		                  \
-		INIT_SVO_CVAR(int, e_svoTI_TraceVoxels);		                  \
-		INIT_SVO_CVAR(int, e_svoTI_AsyncCompute);		                  \
-		INIT_SVO_CVAR(float, e_svoTI_SkyLightBottomMultiplier);		    \
-		INIT_SVO_CVAR(float, e_svoTI_VoxelOpacityMultiplier);         \
 	  // INIT_ALL_SVO_CVARS
 
 	#define INIT_SVO_CVAR(_type, _var) _type _var;

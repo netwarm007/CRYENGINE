@@ -146,16 +146,29 @@ void CFFont::Free()
 
 void CFFont::DrawString(float x, float y, const char* pStr, const bool asciiMultiLine, const STextDrawContext& ctx)
 {
-	CFFont::DrawString(x, y, 1.0f, pStr, asciiMultiLine, ctx);
-}
+	IF (!pStr, 0)
+		return;
 
-#include <CryRenderer/IRenderAuxGeom.h>
+	DrawStringUInternal(x, y, 1.0f, pStr, asciiMultiLine, ctx);
+}
 
 void CFFont::DrawString(float x, float y, float z, const char* pStr, const bool asciiMultiLine, const STextDrawContext& ctx)
 {
-	IF(!pStr, 0) return;
+	IF (!pStr, 0)
+		return;
 
-	IRenderAuxText::DrawString(this, x, y, 1.0f, pStr, asciiMultiLine, ctx);
+	DrawStringUInternal(x, y, z, pStr, asciiMultiLine, ctx);
+}
+
+void CFFont::DrawStringUInternal(float x, float y, float z, const char* pStr, const bool asciiMultiLine, const STextDrawContext& ctx)
+{
+	IF (!pStr || !m_pFontTexture || ctx.m_fxIdx >= m_effects.size() || m_effects[ctx.m_fxIdx].m_passes.empty(), 0)
+		return;
+
+	IRenderer* pRenderer = gEnv->pRenderer;
+	assert(pRenderer);
+
+	pRenderer->DrawStringU(this, x, y, z, pStr, asciiMultiLine, ctx);
 }
 
 ILINE DWORD COLCONV(DWORD clr)
@@ -924,6 +937,7 @@ unsigned int CFFont::GetEffectId(const char* pEffectName) const
 
 bool CFFont::InitTexture()
 {
+	ScopedSwitchToGlobalHeap globalHeap;
 	m_texID = gEnv->pRenderer->FontCreateTexture(m_pFontTexture->GetWidth(), m_pFontTexture->GetHeight(), (uint8*)m_pFontTexture->GetBuffer(), eTF_A8);
 	return m_texID >= 0;
 }

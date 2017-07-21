@@ -32,7 +32,6 @@
 #include "SyncContext.h"
 #include "NetContext.h"
 #include "STLMementoAllocator.h"
-#include <array>
 
 class CNetContext;
 class CNetChannel;
@@ -104,11 +103,11 @@ struct SContextViewConfiguration
 	const SNetMessageDef* pAddFileData;
 	const SNetMessageDef* pEndSyncFile;
 	const SNetMessageDef* pAllFilesSynced;
-	std::array<const SNetMessageDef*, NumAspects> pPartialUpdate;
-	std::array<const SNetMessageDef*, NumAspects> pSetAspectProfileMsgs;
-	std::array<const SNetMessageDef*, NumAspects> pUpdateAspectMsgs;
+	const SNetMessageDef* pPartialUpdate[NumAspects];
+	const SNetMessageDef* pSetAspectProfileMsgs[NumAspects];
+	const SNetMessageDef* pUpdateAspectMsgs[NumAspects];
 #if ENABLE_ASPECT_HASHING
-	std::array<const SNetMessageDef*, NumAspects> pHashAspectMsgs;
+	const SNetMessageDef* pHashAspectMsgs[NumAspects];
 #endif
 	const SNetMessageDef* pRMIMsgs[eNRT_NumReliabilityTypes + 1];
 };
@@ -165,6 +164,7 @@ public:
 
 	virtual bool                           IsClient() const { return false; }
 	virtual bool                           IsServer() const { return false; }
+	virtual bool                           IsPeer() const   { return false; }
 
 	void                                   NetDump(ENetDumpType type, INetDumpLogger& logger);
 
@@ -202,6 +202,11 @@ public:
 
 	// set an aspect profile
 	void SetAspectProfile(SNetObjectID objectID, NetworkAspectType aspect, uint8 profile);
+
+	bool ChangeBindLocksDuringMigration();
+	void BackupStateDuringMigration();
+	void RestoreStateDuringMigration();
+	void ClearStateDuringMigration();
 
 	// INetContextListener
 	virtual void            OnObjectEvent(CNetContextState* pState, SNetObjectEvent* pEvent);
@@ -310,6 +315,7 @@ protected:
 	virtual void ExitState(EContextViewState state);
 	virtual void OnNeedToSendStateInformation(bool urgently);
 	virtual void OnViewStateDisconnect(const char* message);
+	virtual bool IsMigrating() const;
 	// ~CContextViewStateManager
 
 	static const char* GetStateName(EContextViewState state);
@@ -330,6 +336,7 @@ protected:
 	bool         ClearAspects(SNetObjectID netID, NetworkAspectType aspects);
 
 	// generalized message handler for child classes
+
 	bool HandleRMI(TSerialize ser, ENetReliabilityType reliability, bool client);
 
 	// an object was destroyed
@@ -349,7 +356,7 @@ protected:
 	virtual void UnboundObject(SNetObjectID id);
 
 #if ENABLE_ASPECT_HASHING
-	bool HashAspect(NetworkAspectID aspectIdx, TSerialize ser, uint32, uint32, uint32);
+	void HashAspect(NetworkAspectID aspectIdx, TSerialize ser);
 #endif
 
 	virtual void InitChannelEstablishmentTasks(IContextEstablisher* pEst);
@@ -361,7 +368,7 @@ protected:
 	void         DefineExtensionsProtocol(IProtocolBuilder*);
 
 	void         PolluteObjectAspect(SNetObjectID netID, NetworkAspectID aspectIdx);
-	bool         PartialAspect(NetworkAspectID aspectIdx, TSerialize ser, uint32, uint32, uint32);
+	void         PartialAspect(NetworkAspectID aspectIdx, TSerialize ser);
 
 private:
 	virtual bool        ShouldInitContext() = 0;
@@ -496,8 +503,8 @@ protected:
 
 	bool            HaveAuthorityOfObject(SNetObjectID id) const;
 	bool            IgnoringCurrentObject() const { return m_ignoringCurObject; }
-	bool            UpdateAspect(NetworkAspectID i, TSerialize pSerialize, uint32 nCurSeq, uint32 nOldSeq, uint32 timeFraction32);
-	SReceiveContext CreateReceiveContext(TSerialize ser, NetworkAspectID index, uint32 nCurSeq, uint32 nOldSeq, uint32 timeFraction32, bool* ok);
+	bool            UpdateAspect(NetworkAspectID i, TSerialize pSerialize, uint32 nCurSeq, uint32 nOldSeq);
+	SReceiveContext CreateReceiveContext(TSerialize ser, NetworkAspectID index, uint32 nCurSeq, uint32 nOldSeq, bool* ok);
 	bool            SetPhysicsTime(CTimeValue tm);
 	void            StartFlushUpdates() { m_flushUpdates = true; CancelUpdates(); }
 
@@ -507,6 +514,7 @@ protected:
 	SObjects            m_objects;
 	SObjectsEx          m_objectsEx;
 	CNetObjectBindLocks m_objectLocks;
+	static SObjects     m_HostMigrationObjects;
 
 	void ChangedObject(SNetObjectID id, uint32 flags, NetworkAspectType dirtyAspects);
 
@@ -520,6 +528,8 @@ private:
 	void GC_Lazy_StateSink(_smart_ptr<CNetContextState> ) {}
 
 	CHistory*                           m_history[eH_NUM_HISTORIES];
+
+	static _smart_ptr<CNetContextState> m_BackupContextStateDuringMigration;
 
 	CNetChannel*                        m_pParent;
 	CNetContext*                        m_pContext;
@@ -554,7 +564,7 @@ private:
 		return mask;
 	}
 
-	typedef std::map<SAttachmentIndex, IRMIMessageBodyPtr, std::less<SAttachmentIndex>, STLMementoAllocator<std::pair<const SAttachmentIndex, IRMIMessageBodyPtr>>> TAttachmentMap;
+	typedef std::map<SAttachmentIndex, IRMIMessageBodyPtr, std::less<SAttachmentIndex>, STLMementoAllocator<std::pair<SAttachmentIndex, IRMIMessageBodyPtr>>> TAttachmentMap;
 	std::auto_ptr<TAttachmentMap> m_pAttachments[2];
 
 #if ENABLE_DEFERRED_RMI_QUEUE
@@ -566,7 +576,7 @@ protected:
 #if USE_SYSTEM_ALLOCATOR
 	typedef std::multimap<SNetObjectID, SSendableHandle, std::less<SNetObjectID>>                                                                TSendablesMap;
 #else
-	typedef std::multimap<SNetObjectID, SSendableHandle, std::less<SNetObjectID>, STLMementoAllocator<std::pair<const SNetObjectID, SSendableHandle>>> TSendablesMap;
+	typedef std::multimap<SNetObjectID, SSendableHandle, std::less<SNetObjectID>, STLMementoAllocator<std::pair<SNetObjectID, SSendableHandle>>> TSendablesMap;
 #endif
 	std::auto_ptr<TSendablesMap> m_pSendables;
 
@@ -584,7 +594,7 @@ private:
 
 	SNetObjectID                             m_witness;
 	VectorMap<SNetObjectID, SSendableHandle> m_voiceMessageHandles;
-	typedef std::map<SNetObjectID, NetworkAspectType, std::less<SNetObjectID>, STLMementoAllocator<std::pair<const SNetObjectID, NetworkAspectType>>> TEarlyPartialUpdateIDs;
+	typedef std::map<SNetObjectID, NetworkAspectType, std::less<SNetObjectID>, STLMementoAllocator<std::pair<SNetObjectID, NetworkAspectType>>> TEarlyPartialUpdateIDs;
 	std::auto_ptr<TEarlyPartialUpdateIDs>    m_pEarlyPartialUpdateIDs;
 
 	CTimeValue                               m_remotePhysicsTime;
@@ -759,32 +769,5 @@ private:
 	string                   m_name;
 	_smart_ptr<CContextView> m_pView;
 };
-
-// Template helpers for compile-time generation of arrays of aspect-related message definitions.
-typedef unsigned char aspect_num;
-template<template<int> class Func, aspect_num... values>
-struct pack_to_array { static std::array<const SNetMessageDef*, sizeof...(values)> value; };
-
-template<template<int> class Func, aspect_num... values>
-std::array<const SNetMessageDef*, sizeof...(values)> pack_to_array<Func, values...>::value
-	= {{ Func<values>::fun()... }}; // double braces for Clang
-
-template<template<int> class Func, aspect_num k, aspect_num... values>
-struct static_array : static_array<Func, k - 1, k - 1, values...> {};
-
-template<template<int> class Func, aspect_num... values>
-struct static_array<Func, 0, values...> : pack_to_array<Func, values...> {};
-
-// Helper function for aspect-related messages, used by both client- and server-
-// context views. Addresses of these static trampolines are stored in protocol's
-// message definitions and are called on incoming packets. This trampoline 
-// redirects the call to the respective instance.
-template<int AspectNum, class T, bool (T::*memf)(NetworkAspectID, TSerialize, uint32, uint32, uint32)>
-TNetMessageCallbackResult TrampolineAspect(uint32, INetMessageSink *instance,
-	TSerialize serialize, uint32 curSeq, uint32 oldSeq, uint32 timeFraction32, EntityId *, INetChannel *)
-{
-	bool ret = (static_cast<T*>(instance)->*memf)(AspectNum, serialize, curSeq, oldSeq, timeFraction32);
-	return TNetMessageCallbackResult(ret, (INetAtSyncItem*)NULL);
-}
 
 #endif

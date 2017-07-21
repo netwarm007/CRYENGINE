@@ -20,11 +20,6 @@
 	#include "DurangoDebugCallstack.h"
 #endif
 
-#ifdef CRY_USE_CRASHRPT
-	#include <CrashRpt.h>
-extern bool g_bCrashRptInstalled;
-#endif // CRY_USE_CRASHRPT
-
 #if defined(INCLUDE_SCALEFORM_SDK) || defined(CRY_FEATURE_SCALEFORM_HELPER)
 	#include <CrySystem/Scaleform/IScaleformHelper.h>
 #endif
@@ -65,29 +60,12 @@ BOOL APIENTRY DllMain(HANDLE hModule,
 	{
 	case DLL_PROCESS_ATTACH:
 		break;
+	case DLL_THREAD_ATTACH:
+
+		break;
+	case DLL_THREAD_DETACH:
 	case DLL_PROCESS_DETACH:
 		break;
-
-	//////////////////////////////////////////////////////////////////////////
-	case DLL_THREAD_ATTACH:
-	#ifdef CRY_USE_CRASHRPT
-		if (g_bCrashRptInstalled)
-		{
-			crInstallToCurrentThread2(0);
-		}
-	#endif //CRY_USE_CRASHRPT
-		break;
-
-	//////////////////////////////////////////////////////////////////////////
-	case DLL_THREAD_DETACH:
-	#ifdef CRY_USE_CRASHRPT
-		if (g_bCrashRptInstalled)
-		{
-			crUninstallFromCurrentThread();
-		}
-	#endif //CRY_USE_CRASHRPT
-		break;
-
 	}
 	//	int sbh = _set_sbh_threshold(1016);
 
@@ -160,7 +138,7 @@ extern "C"
 	{
 		CSystem* pSystem = NULL;
 
-		pSystem = new CSystem(startupParams);
+		pSystem = new CSystem;
 		ModuleInitISystem(pSystem, "CrySystem");
 #if CRY_PLATFORM_DURANGO
 	#if !defined(_LIB)
@@ -168,8 +146,6 @@ extern "C"
 	#endif
 		gEnv->pWindow = startupParams.hWnd;
 #endif
-
-		gEnv->pGameFramework = startupParams.pGameFramework;
 
 		ICryFactoryRegistryImpl* pCryFactoryImpl = static_cast<ICryFactoryRegistryImpl*>(pSystem->GetCryFactoryRegistry());
 		pCryFactoryImpl->RegisterFactories(g_pHeadToRegFactories);
@@ -184,7 +160,7 @@ extern "C"
 #elif CRY_PLATFORM_DURANGO && defined(ENABLE_PROFILING_CODE)
 		DurangoDebugCallStack::InstallExceptionHandler();
 #endif
-		if (!pSystem->Init())
+		if (!pSystem->Init(startupParams))
 		{
 			delete pSystem;
 
